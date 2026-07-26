@@ -1,0 +1,36 @@
+#!/bin/sh
+
+runtime_dir=${0%/*}
+if command -v python3 >/dev/null 2>&1; then
+  name=$(python3 "$runtime_dir/rdev-agent-name.py" "$@")
+  if [ -n "$name" ]; then
+    printf '%s' "$name"
+    exit 0
+  fi
+fi
+
+ps -axo pid=,ppid=,command= 2>/dev/null | awk -v root="${1:-0}" '
+  {
+    pid[NR] = $1
+    ppid[NR] = $2
+    $1 = ""; $2 = ""
+    command[NR] = tolower($0)
+  }
+  END {
+    wanted[root] = 1
+    for (pass = 0; pass < NR; pass++)
+      for (i = 1; i <= NR; i++)
+        if (wanted[ppid[i]]) wanted[pid[i]] = 1
+    text = ""
+    for (i = 1; i <= NR; i++)
+      if (wanted[pid[i]]) text = text "\n" command[i]
+    if (text ~ /(^|[\/~ ])omp([ ]|$)/ || text ~ /oh-my-pi/) print_name("OMP")
+    else if (text ~ /pi-coding-agent/ || text ~ /(^|[\/~ ])pi([ ]|$)/) print_name("Pi")
+    else if (text ~ /(^|[\/~ ])opencode([ ]|$)/) print_name("OpenCode")
+    else if (text ~ /(^|[\/~ ])codex([ ]|$)/) print_name("Codex")
+    else if (text ~ /(^|[\/~ ])claude([ ]|$)/) print_name("Claude")
+    else if (text ~ /(^|[\/~ ])gemini([ ]|$)/) print_name("Gemini")
+    else print_name("Shell")
+  }
+  function print_name(name) { printf "%s", name }
+'

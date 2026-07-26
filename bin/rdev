@@ -1,0 +1,881 @@
+#!/usr/bin/env bash
+
+# rdev — menu-driven SSH/Mosh + tmux remote development.
+# All state is isolated under ~/.config/rdev and never modifies ~/.ssh/config.
+
+set -o pipefail
+
+RDEV_VERSION="0.1.0"
+APP_NAME="${RDEV_APP_NAME:-rdev · 远程开发}"
+SCRIPT_DIR="$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)"
+CONFIG_DIR="${RDEV_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/rdev}"
+DATA_DIR="${RDEV_DATA_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/rdev}"
+NODES_FILE="$CONFIG_DIR/nodes.conf"
+SETTINGS_FILE="$CONFIG_DIR/config"
+SSH_CONFIG="$CONFIG_DIR/ssh_config"
+STATE_FILE="$CONFIG_DIR/last-node"
+CONTROL_DIR="$CONFIG_DIR/control"
+
+SSH_BIN="${RDEV_SSH_BIN:-$(command -v ssh 2>/dev/null || printf ssh)}"
+RUNTIME_DIR=""
+
+NODE_IDS=()
+NODE_LABELS=()
+NODE_HOSTS=()
+NODE_USERS=()
+NODE_PORTS=()
+NODE_TRANSPORTS=()
+NODE_TMUX_SOCKETS=()
+NODE_IDENTITIES=()
+NODE_PROXY_JUMPS=()
+NODE_MOSH_PORTS=()
+
+SESSION_SOCKETS=()
+SESSION_NAMES=()
+SESSION_DESCRIPTIONS=()
+NODE_SSH_ARGS=()
+
+AUTO_INSTALL_REMOTE="yes"
+AUTO_FALLBACK_SSH="yes"
+CONNECT_TIMEOUT="10"
+MOSH_PREDICT="adaptive"
+
+# These scripts intentionally expand only on the remote host.
+# shellcheck disable=SC2016
+REMOTE_TMUX='if command -v tmux >/dev/null 2>&1; then TMUX_BIN=$(command -v tmux); elif [ -x /opt/homebrew/bin/tmux ]; then TMUX_BIN=/opt/homebrew/bin/tmux; else echo "Remote tmux is not installed." >&2; exit 127; fi'
+
+# shellcheck disable=SC2016
+REMOTE_PREPARE='set -e
+export PATH="$HOME/.local/bin:$HOME/.bun/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:$PATH"
+
+rdev_run_root() {
+  if [ "$(id -u)" -eq 0 ]; then
+    "$@"
+  elif command -v sudo >/dev/null 2>&1; then
+    sudo "$@"
+  else
+    echo "Missing required packages and sudo is unavailable." >&2
+    return 126
+  fi
+}
+
+set --
+command -v tmux >/dev/null 2>&1 || [ -x /opt/homebrew/bin/tmux ] || set -- "$@" tmux
+command -v tar >/dev/null 2>&1 || set -- "$@" tar
+if [ "$rdev_transport" = "mosh" ]; then
+  command -v mosh-server >/dev/null 2>&1 || set -- "$@" mosh
+fi
+
+if [ "$#" -gt 0 ]; then
+  if [ "$rdev_auto_install" != "yes" ]; then
+    echo "Missing remote packages: $*" >&2
+    exit 127
+  fi
+  echo "First connection: installing remote packages: $*"
+  if command -v apt-get >/dev/null 2>&1; then
+    attempt=0
+    until rdev_run_root env DEBIAN_FRONTEND=noninteractive apt-get update -qq; do
+      attempt=$((attempt + 1))
+      [ "$attempt" -ge 5 ] && exit 1
+      echo "Waiting for the package manager lock…"
+      sleep 2
+    done
+    rdev_run_root env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq "$@"
+  elif command -v dnf >/dev/null 2>&1; then
+    rdev_run_root dnf install -y "$@"
+  elif command -v yum >/dev/null 2>&1; then
+    rdev_run_root yum install -y "$@"
+  elif command -v apk >/dev/null 2>&1; then
+    rdev_run_root apk add "$@"
+  elif command -v pacman >/dev/null 2>&1; then
+    rdev_run_root pacman -Sy --noconfirm "$@"
+  elif command -v zypper >/dev/null 2>&1; then
+    rdev_run_root zypper --non-interactive install "$@"
+  elif command -v brew >/dev/null 2>&1; then
+    brew install "$@"
+  else
+    echo "No supported package manager found for: $*" >&2
+    exit 127
+  fi
+fi
+
+command -v tmux >/dev/null 2>&1 || [ -x /opt/homebrew/bin/tmux ] || exit 127
+command -v tar >/dev/null 2>&1 || { echo "Remote tar is not installed." >&2; exit 127; }
+if [ "$rdev_transport" = "mosh" ]; then
+  command -v mosh-server >/dev/null 2>&1 || { echo "Remote mosh-server is not installed." >&2; exit 127; }
+fi'
+
+cleanup_screen() {
+  printf '\033[0m\033[?25h'
+}
+
+abort_rdev() {
+  local exit_code="$1"
+  trap - HUP INT TERM
+  printf '\n'
+  exit "$exit_code"
+}
+
+install_ui_traps() {
+  trap cleanup_screen EXIT
+  trap 'abort_rdev 130' INT
+  trap 'abort_rdev 129' HUP
+  trap 'abort_rdev 143' TERM
+}
+
+find_runtime_dir() {
+  local candidate
+  for candidate in \
+    "${RDEV_RUNTIME_DIR:-}" \
+    "$SCRIPT_DIR/../lib" \
+    "$DATA_DIR" \
+    "$HOME/.local/lib/rdev"
+  do
+    [ -n "$candidate" ] || continue
+    if [ -r "$candidate/tmux.conf" ] &&
+       [ -r "$candidate/rdev-agent-name" ] &&
+       [ -r "$candidate/rdev-token-status" ]; then
+      RUNTIME_DIR="$(CDPATH='' cd -- "$candidate" && pwd)"
+      return 0
+    fi
+  done
+  printf 'rdev runtime files were not found. Re-run the installer.\n' >&2
+  return 1
+}
+
+write_default_settings() {
+  [ -e "$SETTINGS_FILE" ] && return 0
+  umask 077
+  {
+    printf '%s\n' \
+      '# rdev settings' \
+      'auto_install_remote=yes' \
+      'auto_fallback_ssh=yes' \
+      'connect_timeout=10' \
+      'mosh_predict=adaptive'
+  } > "$SETTINGS_FILE"
+}
+
+write_default_ssh_config() {
+  [ -e "$SSH_CONFIG" ] && return 0
+  umask 077
+  {
+    printf '%s\n' \
+      '# rdev-only SSH options. This file does not modify normal ssh behavior.' \
+      '# Add Host blocks here when a node needs custom SSH options.' \
+      'Include ~/.ssh/config'
+  } > "$SSH_CONFIG"
+}
+
+init_config() {
+  umask 077
+  mkdir -p "$CONFIG_DIR" "$CONTROL_DIR"
+  chmod 700 "$CONFIG_DIR" "$CONTROL_DIR" 2>/dev/null || true
+  [ -e "$NODES_FILE" ] || {
+    printf '%s\n' '# id|label|host|user|ssh_port|transport|tmux_socket|identity_file|proxy_jump|mosh_udp_port_or_range' > "$NODES_FILE"
+  }
+  chmod 600 "$NODES_FILE" 2>/dev/null || true
+  write_default_settings
+  write_default_ssh_config
+}
+
+load_settings() {
+  local key value
+  while IFS='=' read -r key value; do
+    case "$key" in
+      ''|\#*) continue ;;
+      auto_install_remote) [ "$value" = "yes" ] || [ "$value" = "no" ] || continue; AUTO_INSTALL_REMOTE="$value" ;;
+      auto_fallback_ssh) [ "$value" = "yes" ] || [ "$value" = "no" ] || continue; AUTO_FALLBACK_SSH="$value" ;;
+      connect_timeout) case "$value" in *[!0-9]*|'') continue ;; esac; CONNECT_TIMEOUT="$value" ;;
+      mosh_predict) case "$value" in adaptive|always|never|experimental) MOSH_PREDICT="$value" ;; esac ;;
+    esac
+  done < "$SETTINGS_FILE"
+}
+
+slugify() {
+  local slug
+  slug="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9._-]/-/g; s/--*/-/g; s/^-//; s/-$//')"
+  [ -n "$slug" ] || slug="node-$(date +%s)"
+  REPLY="$slug"
+}
+
+legacy_config_detected() {
+  local fields
+  fields="$(awk -F'|' '!/^[[:space:]]*(#|$)/ { print NF; exit }' "$NODES_FILE")"
+  [ "$fields" = "4" ]
+}
+
+migrate_legacy_config() {
+  local backup temp label alias socket transport extra node_id ssh_g user port
+  legacy_config_detected || return 0
+  backup="$NODES_FILE.legacy.$(date +%Y%m%d%H%M%S)"
+  temp="$NODES_FILE.tmp.$$"
+  cp "$NODES_FILE" "$backup" || return 1
+  printf '%s\n' '# id|label|host|user|ssh_port|transport|tmux_socket|identity_file|proxy_jump|mosh_udp_port_or_range' > "$temp"
+
+  while IFS='|' read -r label alias socket transport extra; do
+    case "$label" in ''|\#*) continue ;; esac
+    [ -z "$extra" ] || continue
+    slugify "${alias#rdev-}"
+    node_id="$REPLY"
+    ssh_g="$("$SSH_BIN" -G -F "$SSH_CONFIG" "$alias" 2>/dev/null || true)"
+    user="$(printf '%s\n' "$ssh_g" | awk '$1=="user"{print $2;exit}')"
+    port="$(printf '%s\n' "$ssh_g" | awk '$1=="port"{print $2;exit}')"
+    [ -n "$user" ] || user="${USER:-$(id -un)}"
+    [ -n "$port" ] || port="22"
+    [ -n "$transport" ] || transport="ssh"
+    printf '%s|%s|%s|%s|%s|%s|%s|||\n' \
+      "$node_id" "$label" "$alias" "$user" "$port" "$transport" "$socket" >> "$temp"
+  done < "$NODES_FILE"
+
+  mv "$temp" "$NODES_FILE"
+  chmod 600 "$NODES_FILE"
+  printf 'Migrated the legacy node configuration. Backup: %s\n' "$backup" >&2
+}
+
+validate_field() {
+  case "$2" in
+    *'|'*|*'
+'*) printf '%s cannot contain "|" or a newline.\n' "$1" >&2; return 1 ;;
+  esac
+}
+
+load_nodes() {
+  local id label host user port transport socket identity proxy_jump mosh_port extra
+  NODE_IDS=()
+  NODE_LABELS=()
+  NODE_HOSTS=()
+  NODE_USERS=()
+  NODE_PORTS=()
+  NODE_TRANSPORTS=()
+  NODE_TMUX_SOCKETS=()
+  NODE_IDENTITIES=()
+  NODE_PROXY_JUMPS=()
+  NODE_MOSH_PORTS=()
+
+  while IFS='|' read -r id label host user port transport socket identity proxy_jump mosh_port extra; do
+    case "$id" in ''|\#*) continue ;; esac
+    if [ -n "$extra" ] || [ -z "$label" ] || [ -z "$host" ] || [ -z "$user" ] ||
+       [ -z "$port" ] || [ -z "$transport" ] || [ -z "$socket" ]; then
+      printf 'Invalid node configuration for "%s" in %s\n' "$id" "$NODES_FILE" >&2
+      return 1
+    fi
+    case "$transport" in ssh|mosh) ;; *) printf 'Invalid transport for "%s": %s\n' "$id" "$transport" >&2; return 1 ;; esac
+    NODE_IDS[${#NODE_IDS[@]}]="$id"
+    NODE_LABELS[${#NODE_LABELS[@]}]="$label"
+    NODE_HOSTS[${#NODE_HOSTS[@]}]="$host"
+    NODE_USERS[${#NODE_USERS[@]}]="$user"
+    NODE_PORTS[${#NODE_PORTS[@]}]="$port"
+    NODE_TRANSPORTS[${#NODE_TRANSPORTS[@]}]="$transport"
+    NODE_TMUX_SOCKETS[${#NODE_TMUX_SOCKETS[@]}]="$socket"
+    NODE_IDENTITIES[${#NODE_IDENTITIES[@]}]="$identity"
+    NODE_PROXY_JUMPS[${#NODE_PROXY_JUMPS[@]}]="$proxy_jump"
+    NODE_MOSH_PORTS[${#NODE_MOSH_PORTS[@]}]="$mosh_port"
+  done < "$NODES_FILE"
+}
+
+find_node_index() {
+  local reference="$1"
+  local i
+  case "$reference" in
+    *[!0-9]*|'') ;;
+    *)
+      if [ "$reference" -ge 1 ] 2>/dev/null && [ "$reference" -le "${#NODE_IDS[@]}" ]; then
+        REPLY="$((reference - 1))"
+        return 0
+      fi
+      ;;
+  esac
+  i=0
+  while [ "$i" -lt "${#NODE_IDS[@]}" ]; do
+    if [ "${NODE_IDS[$i]}" = "$reference" ]; then
+      REPLY="$i"
+      return 0
+    fi
+    i=$((i + 1))
+  done
+  return 1
+}
+
+build_ssh_args() {
+  local index="$1"
+  NODE_SSH_ARGS=(
+    -F "$SSH_CONFIG"
+    -p "${NODE_PORTS[$index]}"
+    -l "${NODE_USERS[$index]}"
+    -o "ConnectTimeout=$CONNECT_TIMEOUT"
+    -o ControlMaster=auto
+    -o "ControlPath=$CONTROL_DIR/%C"
+    -o ControlPersist=60
+  )
+  [ -n "${NODE_IDENTITIES[$index]}" ] && NODE_SSH_ARGS+=( -i "${NODE_IDENTITIES[$index]}" )
+  [ -n "${NODE_PROXY_JUMPS[$index]}" ] && NODE_SSH_ARGS+=( -J "${NODE_PROXY_JUMPS[$index]}" )
+}
+
+header() {
+  command -v clear >/dev/null 2>&1 && clear 2>/dev/null || printf '\033[2J\033[H'
+  printf '\033[1;36m%s\033[0m\n' "$APP_NAME"
+  printf '%s\n\n' '────────────────────────────────────────'
+}
+
+choose_number() {
+  local prompt="$1"
+  local max="$2"
+  local default_value="${3:-}"
+  local answer
+  while true; do
+    if [ -n "$default_value" ]; then
+      printf '%s [Enter=%s, q=quit]: ' "$prompt" "$default_value"
+    else
+      printf '%s [q=quit]: ' "$prompt"
+    fi
+    IFS= read -r answer || return 1
+    case "$answer" in q|Q) return 1 ;; esac
+    [ -z "$answer" ] && [ -n "$default_value" ] && answer="$default_value"
+    case "$answer" in
+      *[!0-9]*|'') ;;
+      *)
+        if [ "$answer" -ge 1 ] 2>/dev/null && [ "$answer" -le "$max" ]; then
+          REPLY="$answer"
+          return 0
+        fi
+        ;;
+    esac
+    printf '\033[31mChoose a number from 1 to %d.\033[0m\n' "$max"
+  done
+}
+
+pick_node() {
+  local i default_node last_id
+  if [ "${#NODE_IDS[@]}" -eq 0 ]; then
+    printf 'No nodes yet. Add one with:\n  rdev add NAME HOST --user USER [--port 22] [--mosh]\n'
+    return 2
+  fi
+
+  header
+  printf '\033[1m选择远程节点 · Select a node\033[0m\n\n'
+  i=0
+  while [ "$i" -lt "${#NODE_LABELS[@]}" ]; do
+    printf '  \033[36m%d\033[0m) %s\n' "$((i + 1))" "${NODE_LABELS[$i]}"
+    i=$((i + 1))
+  done
+
+  default_node=""
+  if [ -r "$STATE_FILE" ]; then
+    IFS= read -r last_id < "$STATE_FILE" || true
+    i=0
+    while [ "$i" -lt "${#NODE_IDS[@]}" ]; do
+      if [ "${NODE_IDS[$i]}" = "$last_id" ]; then
+        default_node="$((i + 1))"
+        break
+      fi
+      i=$((i + 1))
+    done
+  fi
+
+  printf '\n'
+  choose_number "Node" "${#NODE_LABELS[@]}" "$default_node" || return 1
+  NODE_INDEX="$((REPLY - 1))"
+  printf '%s\n' "${NODE_IDS[$NODE_INDEX]}" > "$STATE_FILE"
+}
+
+prepare_remote() {
+  local index="$1"
+  local transport="${NODE_TRANSPORTS[$index]}"
+  local runtime_files="rdev-agent-name rdev-agent-name.py rdev-token-status rdev-token-status.py tmux.conf"
+  local runtime_file
+
+  for runtime_file in $runtime_files; do
+    if [ ! -r "$RUNTIME_DIR/$runtime_file" ]; then
+      printf 'Missing local runtime file: %s\n' "$runtime_file" >&2
+      return 1
+    fi
+  done
+
+  build_ssh_args "$index"
+  printf '%s\n' "$REMOTE_PREPARE" |
+    "$SSH_BIN" -T "${NODE_SSH_ARGS[@]}" "${NODE_HOSTS[$index]}" \
+      "rdev_transport=$transport rdev_auto_install=$AUTO_INSTALL_REMOTE exec sh -s" || return $?
+
+  # shellcheck disable=SC2086
+  # The command after ssh intentionally expands on the remote host.
+  # shellcheck disable=SC2016
+  COPYFILE_DISABLE=1 tar -cf - -C "$RUNTIME_DIR" $runtime_files |
+    "$SSH_BIN" -T "${NODE_SSH_ARGS[@]}" "${NODE_HOSTS[$index]}" \
+      'umask 022; mkdir -p "$HOME/.cache/rdev/bin"; tar -xf - -C "$HOME/.cache/rdev/bin"; chmod 755 "$HOME/.cache/rdev/bin/rdev-agent-name" "$HOME/.cache/rdev/bin/rdev-token-status"; nohup "$HOME/.cache/rdev/bin/rdev-token-status" "$$" </dev/null >/dev/null 2>&1 &'
+}
+
+fetch_sessions() {
+  local index="$1"
+  local managed_socket="${NODE_TMUX_SOCKETS[$index]}"
+  local output rc socket name windows attached description
+  SESSION_SOCKETS=()
+  SESSION_NAMES=()
+  SESSION_DESCRIPTIONS=()
+  build_ssh_args "$index"
+
+  output="$("$SSH_BIN" -T -n "${NODE_SSH_ARGS[@]}" "${NODE_HOSTS[$index]}" \
+    "$REMOTE_TMUX; \"\$TMUX_BIN\" -L $(printf '%q' "$managed_socket") list-sessions -F \"$(printf '%q' "$managed_socket")\\t#{session_name}\\t#{session_windows}\\t#{session_attached}\" 2>/dev/null || true")"
+  rc=$?
+  [ "$rc" -ne 0 ] && return "$rc"
+
+  while IFS=$'\t' read -r socket name windows attached; do
+    [ -n "$name" ] || continue
+    SESSION_SOCKETS[${#SESSION_SOCKETS[@]}]="$socket"
+    SESSION_NAMES[${#SESSION_NAMES[@]}]="$name"
+    description="$name  ·  $windows window(s)"
+    [ "${attached:-0}" -gt 0 ] 2>/dev/null && description="$description  ·  attached"
+    SESSION_DESCRIPTIONS[${#SESSION_DESCRIPTIONS[@]}]="$description"
+  done <<< "$output"
+}
+
+pick_session() {
+  local index="$1"
+  local label="${NODE_LABELS[$index]}"
+  local managed_socket="${NODE_TMUX_SOCKETS[$index]}"
+  local i generated name session_index
+
+  header
+  printf '\033[1m%s\033[0m\n\n' "$label"
+  printf '正在准备远程环境… · Preparing remote environment…\n'
+  if ! prepare_remote "$index"; then
+    printf '\n\033[31mUnable to prepare this node. Check its network and install permissions.\033[0m\n'
+    printf 'Press Enter to return…'
+    IFS= read -r _ || return 1
+    return 2
+  fi
+
+  printf '正在读取 tmux 会话… · Reading tmux sessions…\n'
+  if ! fetch_sessions "$index"; then
+    printf '\n\033[31mUnable to read this node. Check the connection and retry.\033[0m\n'
+    printf 'Press Enter to return…'
+    IFS= read -r _ || return 1
+    return 2
+  fi
+
+  header
+  printf '\033[1m%s · tmux\033[0m\n\n' "$label"
+  printf '  \033[32m1\033[0m) ＋ New session\n'
+  i=0
+  while [ "$i" -lt "${#SESSION_NAMES[@]}" ]; do
+    printf '  \033[36m%d\033[0m) %s\n' "$((i + 2))" "${SESSION_DESCRIPTIONS[$i]}"
+    i=$((i + 1))
+  done
+
+  printf '\n'
+  choose_number "Session" "$(( ${#SESSION_NAMES[@]} + 1 ))" || return 1
+  if [ "$REPLY" -eq 1 ]; then
+    generated="work-$(date +%m%d-%H%M)"
+    printf 'Session name [Enter=%s]: ' "$generated"
+    IFS= read -r name || return 1
+    [ -n "$name" ] || name="$generated"
+    case "$name" in *[!A-Za-z0-9_-]*|'') printf '\nSession names may only contain letters, numbers, "_" and "-".\n'; return 2 ;; esac
+    SESSION_NAME="$name"
+    SESSION_SOCKET="$managed_socket"
+  else
+    session_index="$((REPLY - 2))"
+    SESSION_NAME="${SESSION_NAMES[$session_index]}"
+    SESSION_SOCKET="${SESSION_SOCKETS[$session_index]}"
+  fi
+}
+
+remote_attach_command() {
+  local socket="$1"
+  local session="$2"
+  local quoted_socket quoted_session quoted_window refresh_name runtime_config
+  printf -v quoted_socket '%q' "$socket"
+  printf -v quoted_session '%q' "$session"
+  printf -v quoted_window '%q' "Shell"
+  refresh_name="if [ -x \"\$HOME/.cache/rdev/bin/rdev-agent-name\" ]; then RDEV_CURRENT_NAME=\$(\"\$TMUX_BIN\" -L $quoted_socket display-message -p -t $quoted_session '#{window_name}'); case \"\$RDEV_CURRENT_NAME\" in Shell|bun|node|zsh|bash|sh|fish|python|python3|omp|pi|opencode|codex|claude|gemini|qwen|amp|aider|goose|copilot|crush|kimi) RDEV_PANE_PID=\$(\"\$TMUX_BIN\" -L $quoted_socket display-message -p -t $quoted_session '#{pane_pid}'); RDEV_AGENT_NAME=\$(\"\$HOME/.cache/rdev/bin/rdev-agent-name\" \"\$RDEV_PANE_PID\"); if [ -n \"\$RDEV_AGENT_NAME\" ]; then \"\$TMUX_BIN\" -L $quoted_socket rename-window -t $quoted_session \"\$RDEV_AGENT_NAME\"; \"\$TMUX_BIN\" -L $quoted_socket set-window-option -t $quoted_session automatic-rename off; fi;; esac; fi"
+  runtime_config="\"\$TMUX_BIN\" -L $quoted_socket source-file \"\$HOME/.cache/rdev/bin/tmux.conf\" 2>/dev/null || true"
+  REPLY="$REMOTE_TMUX; cd \"\$HOME\" || exit 1; if ! \"\$TMUX_BIN\" -L $quoted_socket has-session -t $quoted_session 2>/dev/null; then \"\$TMUX_BIN\" -L $quoted_socket new-session -d -s $quoted_session -n $quoted_window; \"\$TMUX_BIN\" -L $quoted_socket set-window-option -t $quoted_session automatic-rename off; fi; $runtime_config; $refresh_name; \"\$TMUX_BIN\" -L $quoted_socket set-option -t $quoted_session mouse on; exec \"\$TMUX_BIN\" -L $quoted_socket attach-session -t $quoted_session"
+}
+
+remote_session_exists() {
+  local index="$1"
+  local socket="$2"
+  local session="$3"
+  local quoted_socket quoted_session
+  printf -v quoted_socket '%q' "$socket"
+  printf -v quoted_session '%q' "$session"
+  build_ssh_args "$index"
+  "$SSH_BIN" -T -n "${NODE_SSH_ARGS[@]}" -o BatchMode=yes "${NODE_HOSTS[$index]}" \
+    "$REMOTE_TMUX; \"\$TMUX_BIN\" -L $quoted_socket has-session -t $quoted_session 2>/dev/null"
+}
+
+connect_ssh() {
+  local index="$1"
+  local socket="$2"
+  local session="$3"
+  local label="${NODE_LABELS[$index]}"
+  local remote_command rc session_state seconds
+  remote_attach_command "$socket" "$session"
+  remote_command="$REPLY"
+  build_ssh_args "$index"
+
+  while true; do
+    header
+    printf '\033[1m%s\033[0m\n' "$label"
+    printf 'tmux: \033[36m%s\033[0m\n\n' "$session"
+    printf 'SSH reconnects after an unexpected disconnect; a normal exit returns here.\n\n'
+    "$SSH_BIN" -tt "${NODE_SSH_ARGS[@]}" \
+      -o ServerAliveInterval=10 -o ServerAliveCountMax=3 \
+      "${NODE_HOSTS[$index]}" "$remote_command"
+    rc=$?
+    [ "$rc" -ne 255 ] && return "$rc"
+
+    remote_session_exists "$index" "$socket" "$session"
+    session_state=$?
+    if [ "$session_state" -eq 1 ]; then
+      printf '\nThe tmux session exited normally; reconnect is disabled.\n'
+      sleep 1
+      return 0
+    fi
+
+    seconds=3
+    while [ "$seconds" -ge 1 ]; do
+      printf '\r\033[33mConnection lost; restoring this session in %d second(s)…\033[0m' "$seconds"
+      sleep 1
+      seconds=$((seconds - 1))
+    done
+    printf '\r%80s\r' ''
+  done
+}
+
+install_local_mosh() {
+  printf 'Mosh is not installed locally. Attempting installation…\n'
+  if command -v brew >/dev/null 2>&1; then
+    brew install mosh
+  elif command -v apt-get >/dev/null 2>&1; then
+    if [ "$(id -u)" -eq 0 ]; then apt-get update && apt-get install -y mosh; else sudo apt-get update && sudo apt-get install -y mosh; fi
+  elif command -v dnf >/dev/null 2>&1; then
+    if [ "$(id -u)" -eq 0 ]; then dnf install -y mosh; else sudo dnf install -y mosh; fi
+  elif command -v pacman >/dev/null 2>&1; then
+    if [ "$(id -u)" -eq 0 ]; then pacman -Sy --noconfirm mosh; else sudo pacman -Sy --noconfirm mosh; fi
+  elif command -v apk >/dev/null 2>&1; then
+    if [ "$(id -u)" -eq 0 ]; then apk add mosh; else sudo apk add mosh; fi
+  else
+    return 1
+  fi
+}
+
+ensure_local_mosh() {
+  local mosh_bin
+  mosh_bin="$(command -v mosh 2>/dev/null || true)"
+  if [ -z "$mosh_bin" ]; then
+    install_local_mosh || return 1
+    mosh_bin="$(command -v mosh 2>/dev/null || true)"
+  fi
+  [ -n "$mosh_bin" ] || return 1
+  REPLY="$mosh_bin"
+}
+
+connect_mosh() {
+  local index="$1"
+  local socket="$2"
+  local session="$3"
+  local label="${NODE_LABELS[$index]}"
+  local mosh_bin mosh_ssh remote_command started_at rc session_state seconds
+  local -a mosh_args
+
+  if ! ensure_local_mosh; then
+    printf 'Unable to install Mosh locally.\n' >&2
+    if [ "$AUTO_FALLBACK_SSH" = "yes" ]; then
+      connect_ssh "$index" "$socket" "$session"
+      return $?
+    fi
+    return 127
+  fi
+  mosh_bin="$REPLY"
+  build_ssh_args "$index"
+  printf -v mosh_ssh '%q ' "$SSH_BIN" "${NODE_SSH_ARGS[@]}"
+  remote_attach_command "$socket" "$session"
+  remote_command="$REPLY"
+
+  while true; do
+    header
+    printf '\033[1m%s\033[0m\n' "$label"
+    printf 'tmux: \033[36m%s\033[0m\n\n' "$session"
+    printf 'Mosh restores roaming and temporary network interruptions automatically.\n\n'
+    started_at=$SECONDS
+    mosh_args=( "--predict=$MOSH_PREDICT" "--ssh=$mosh_ssh" )
+    [ -n "${NODE_MOSH_PORTS[$index]}" ] && mosh_args+=( -p "${NODE_MOSH_PORTS[$index]}" )
+    MOSH_TITLE_NOPREFIX=1 "$mosh_bin" "${mosh_args[@]}" -- \
+      "${NODE_HOSTS[$index]}" sh -lc "$remote_command"
+    rc=$?
+    [ "$rc" -eq 0 ] && return 0
+
+    if [ $((SECONDS - started_at)) -lt 15 ] && [ "$AUTO_FALLBACK_SSH" = "yes" ]; then
+      printf '\n\033[33mMosh UDP startup failed; falling back to SSH automatically.\033[0m\n'
+      sleep 1
+      connect_ssh "$index" "$socket" "$session"
+      return $?
+    fi
+
+    remote_session_exists "$index" "$socket" "$session"
+    session_state=$?
+    if [ "$session_state" -eq 1 ]; then
+      printf '\nThe tmux session exited normally; reconnect is disabled.\n'
+      sleep 1
+      return 0
+    fi
+
+    seconds=3
+    while [ "$seconds" -ge 1 ]; do
+      printf '\r\033[33mMosh ended unexpectedly; restoring this session in %d second(s)…\033[0m' "$seconds"
+      sleep 1
+      seconds=$((seconds - 1))
+    done
+    printf '\r%80s\r' ''
+  done
+}
+
+connect_node() {
+  local index="$1"
+  local socket="$2"
+  local session="$3"
+  case "${NODE_TRANSPORTS[$index]}" in
+    mosh) connect_mosh "$index" "$socket" "$session" ;;
+    *) connect_ssh "$index" "$socket" "$session" ;;
+  esac
+}
+
+run_menu() {
+  local pick_rc
+  install_ui_traps
+  load_nodes || return 1
+  while true; do
+    pick_node
+    pick_rc=$?
+    [ "$pick_rc" -eq 2 ] && return 0
+    [ "$pick_rc" -ne 0 ] && return 0
+
+    pick_session "$NODE_INDEX"
+    pick_rc=$?
+    [ "$pick_rc" -eq 1 ] && continue
+    [ "$pick_rc" -eq 2 ] && continue
+    connect_node "$NODE_INDEX" "$SESSION_SOCKET" "$SESSION_NAME"
+    return $?
+  done
+}
+
+prompt_default() {
+  local prompt="$1"
+  local default_value="$2"
+  local value
+  printf '%s [%s]: ' "$prompt" "$default_value"
+  IFS= read -r value || return 1
+  [ -n "$value" ] || value="$default_value"
+  REPLY="$value"
+}
+
+command_add() {
+  local name=""
+  local host=""
+  local user="${USER:-$(id -un)}"
+  local port="22"
+  local transport="ssh"
+  local socket=""
+  local identity=""
+  local proxy_jump=""
+  local mosh_port=""
+  local requested_id=""
+  local id pair
+  local -a positionals
+  positionals=()
+
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --user|-u) [ "$#" -ge 2 ] || { printf '%s requires a value.\n' "$1" >&2; return 2; }; user="$2"; shift 2 ;;
+      --port|-p) [ "$#" -ge 2 ] || { printf '%s requires a value.\n' "$1" >&2; return 2; }; port="$2"; shift 2 ;;
+      --transport|-t) [ "$#" -ge 2 ] || { printf '%s requires a value.\n' "$1" >&2; return 2; }; transport="$2"; shift 2 ;;
+      --mosh) transport="mosh"; shift ;;
+      --ssh) transport="ssh"; shift ;;
+      --socket) [ "$#" -ge 2 ] || { printf '%s requires a value.\n' "$1" >&2; return 2; }; socket="$2"; shift 2 ;;
+      --identity|-i) [ "$#" -ge 2 ] || { printf '%s requires a value.\n' "$1" >&2; return 2; }; identity="$2"; shift 2 ;;
+      --proxy-jump|-J) [ "$#" -ge 2 ] || { printf '%s requires a value.\n' "$1" >&2; return 2; }; proxy_jump="$2"; shift 2 ;;
+      --mosh-port) [ "$#" -ge 2 ] || { printf '%s requires a value.\n' "$1" >&2; return 2; }; mosh_port="$2"; shift 2 ;;
+      --id) [ "$#" -ge 2 ] || { printf '%s requires a value.\n' "$1" >&2; return 2; }; requested_id="$2"; shift 2 ;;
+      --help|-h) usage_add; return 0 ;;
+      --*) printf 'Unknown add option: %s\n' "$1" >&2; return 2 ;;
+      *) positionals[${#positionals[@]}]="$1"; shift ;;
+    esac
+  done
+
+  [ "${#positionals[@]}" -ge 1 ] && name="${positionals[0]}"
+  [ "${#positionals[@]}" -ge 2 ] && host="${positionals[1]}"
+  [ "${#positionals[@]}" -le 2 ] || { printf 'add accepts at most NAME and HOST as positional arguments.\n' >&2; return 2; }
+
+  if [ -z "$name" ]; then printf 'Display name: '; IFS= read -r name || return 1; fi
+  if [ -z "$host" ]; then printf 'Host or IP: '; IFS= read -r host || return 1; fi
+  [ -n "$name" ] && [ -n "$host" ] || { printf 'NAME and HOST are required.\n' >&2; return 2; }
+
+  if [ "${#positionals[@]}" -eq 0 ]; then
+    prompt_default "SSH user" "$user" || return 1; user="$REPLY"
+    prompt_default "SSH port" "$port" || return 1; port="$REPLY"
+    prompt_default "Transport (ssh/mosh)" "$transport" || return 1; transport="$REPLY"
+    if [ "$transport" = "mosh" ]; then
+      prompt_default "Mosh UDP port/range (blank=automatic)" "$mosh_port" || return 1
+      mosh_port="$REPLY"
+    fi
+  fi
+
+  case "$port" in *[!0-9]*|'') printf 'SSH port must be a number.\n' >&2; return 2 ;; esac
+  [ "$port" -ge 1 ] && [ "$port" -le 65535 ] || { printf 'SSH port must be between 1 and 65535.\n' >&2; return 2; }
+  case "$transport" in ssh|mosh) ;; *) printf 'Transport must be ssh or mosh.\n' >&2; return 2 ;; esac
+  if [ -n "$mosh_port" ]; then
+    case "$mosh_port" in *[!0-9:]*|:*|*:) printf 'Mosh port must look like 60000 or 60000:61000.\n' >&2; return 2 ;; esac
+  fi
+  for pair in "name:$name" "host:$host" "user:$user" "identity:$identity" "proxy-jump:$proxy_jump"; do
+    validate_field "${pair%%:*}" "${pair#*:}" || return 2
+  done
+
+  if [ -n "$requested_id" ]; then REPLY="$requested_id"; else slugify "$name"; fi
+  id="$REPLY"
+  case "$id" in *[!a-zA-Z0-9._-]*|'') printf 'Node ID contains unsupported characters: %s\n' "$id" >&2; return 2 ;; esac
+  [ -n "$socket" ] || socket="rdev-$id"
+  validate_field "socket" "$socket" || return 2
+
+  load_nodes || return 1
+  if find_node_index "$id"; then
+    printf 'A node with ID "%s" already exists. Remove it first or choose --id.\n' "$id" >&2
+    return 2
+  fi
+
+  printf '%s|%s|%s|%s|%s|%s|%s|%s|%s|%s\n' \
+    "$id" "$name" "$host" "$user" "$port" "$transport" "$socket" "$identity" "$proxy_jump" "$mosh_port" >> "$NODES_FILE"
+  chmod 600 "$NODES_FILE"
+  printf 'Added %s (%s@%s:%s via %s).\n' "$name" "$user" "$host" "$port" "$transport"
+}
+
+command_list() {
+  local i
+  load_nodes || return 1
+  if [ "${#NODE_IDS[@]}" -eq 0 ]; then
+    printf 'No nodes configured.\n'
+    return 0
+  fi
+  printf '%-4s %-20s %-28s %-8s %s\n' '#' 'ID' 'LABEL' 'MODE' 'TARGET'
+  i=0
+  while [ "$i" -lt "${#NODE_IDS[@]}" ]; do
+    printf '%-4s %-20s %-28s %-8s %s@%s:%s\n' \
+      "$((i + 1))" "${NODE_IDS[$i]}" "${NODE_LABELS[$i]}" "${NODE_TRANSPORTS[$i]}" \
+      "${NODE_USERS[$i]}" "${NODE_HOSTS[$i]}" "${NODE_PORTS[$i]}"
+    i=$((i + 1))
+  done
+}
+
+command_remove() {
+  local reference="${1:-}"
+  local remove_index remove_id temp count line line_id
+  [ -n "$reference" ] || { printf 'Usage: rdev remove ID|NUMBER\n' >&2; return 2; }
+  load_nodes || return 1
+  find_node_index "$reference" || { printf 'Node not found: %s\n' "$reference" >&2; return 1; }
+  remove_index="$REPLY"
+  remove_id="${NODE_IDS[$remove_index]}"
+  temp="$NODES_FILE.tmp.$$"
+  count=0
+  : > "$temp"
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in ''|\#*) printf '%s\n' "$line" >> "$temp"; continue ;; esac
+    line_id="${line%%|*}"
+    if [ "$line_id" != "$remove_id" ]; then printf '%s\n' "$line" >> "$temp"; fi
+    count=$((count + 1))
+  done < "$NODES_FILE"
+  mv "$temp" "$NODES_FILE"
+  chmod 600 "$NODES_FILE"
+  printf 'Removed node: %s\n' "$remove_id"
+}
+
+command_doctor() {
+  local failures=0
+  local dependency
+  printf 'rdev %s\n' "$RDEV_VERSION"
+  printf 'Config:  %s\n' "$CONFIG_DIR"
+  printf 'Runtime: %s\n' "$RUNTIME_DIR"
+  for dependency in ssh tar tmux; do
+    if command -v "$dependency" >/dev/null 2>&1; then
+      printf '  [ok] %s: %s\n' "$dependency" "$(command -v "$dependency")"
+    else
+      printf '  [--] %s: not installed locally%s\n' "$dependency" "$([ "$dependency" = tmux ] && printf ' (remote tmux is what rdev requires)' || true)"
+      [ "$dependency" = "ssh" ] && failures=$((failures + 1))
+    fi
+  done
+  if command -v mosh >/dev/null 2>&1; then
+    printf '  [ok] mosh: %s\n' "$(command -v mosh)"
+  else
+    printf '  [--] mosh: installed automatically when first needed\n'
+  fi
+  load_nodes || failures=$((failures + 1))
+  printf 'Nodes:   %d\n' "${#NODE_IDS[@]}"
+  [ "$failures" -eq 0 ]
+}
+
+usage_add() {
+  cat <<'EOF'
+Usage:
+  rdev add NAME HOST [options]
+  rdev add                         Interactive mode
+
+Options:
+  -u, --user USER                 SSH user (default: current user)
+  -p, --port PORT                 SSH port (default: 22)
+  -t, --transport ssh|mosh        Connection transport
+      --mosh / --ssh              Transport shortcuts
+  -i, --identity FILE             SSH private key
+  -J, --proxy-jump HOST           SSH jump host
+      --socket NAME               Dedicated tmux socket
+      --mosh-port PORT[:PORT]     Fixed/published UDP port or range
+      --id ID                     Stable configuration ID
+
+Example:
+  rdev add "Build server" 10.0.0.8 --user root --port 2224 --mosh
+EOF
+}
+
+usage() {
+  cat <<EOF
+rdev $RDEV_VERSION — SSH/Mosh + tmux without commands to remember
+
+Usage:
+  rdev                         Open the node and tmux menu
+  rdev add [NAME HOST] [...]   Add a node (interactive when omitted)
+  rdev list                   List configured nodes
+  rdev remove ID|NUMBER       Remove a node
+  rdev edit                   Edit the independent node file
+  rdev config                 Show configuration paths
+  rdev doctor                 Check the installation
+  rdev version                Show the version
+  rdev help                   Show this help
+
+Run "rdev add --help" for all node options.
+EOF
+}
+
+main() {
+  local command_name
+  init_config || return 1
+  load_settings
+  migrate_legacy_config || return 1
+  find_runtime_dir || return 1
+
+  command_name="${1:-}"
+  [ "$#" -gt 0 ] && shift
+  case "$command_name" in
+    '') run_menu ;;
+    add) command_add "$@" ;;
+    list|ls) command_list ;;
+    remove|rm|delete) command_remove "$@" ;;
+    edit) "${EDITOR:-vi}" "$NODES_FILE" ;;
+    config)
+      printf 'config=%s\nnodes=%s\nssh_config=%s\nruntime=%s\n' \
+        "$SETTINGS_FILE" "$NODES_FILE" "$SSH_CONFIG" "$RUNTIME_DIR"
+      ;;
+    doctor) command_doctor ;;
+    version|--version|-V) printf 'rdev %s\n' "$RDEV_VERSION" ;;
+    help|--help|-h) usage ;;
+    *) printf 'Unknown command: %s\n\n' "$command_name" >&2; usage >&2; return 2 ;;
+  esac
+}
+
+main "$@"
