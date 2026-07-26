@@ -16,3 +16,5 @@ jobs:
         run: ./tests/test_syntax.sh
       - name: CLI
         run: ./tests/test_cli.sh
+      - name: Active connection recovery
+        run: ./tests/test_active_connection.sh

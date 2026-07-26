@@ -319,10 +319,10 @@ record_recovery() {
   local socket="$2"
   local session="$3"
   local recovery_file
-  recovery_file="$RECOVERY_DIR/${NODE_IDS[$index]}--$session.state"
+  recovery_file="$RECOVERY_DIR/${NODE_IDS[$index]}--$session--$$.state"
   umask 077
-  printf '%s|%s|%s|%s\n' \
-    "${NODE_IDS[$index]}" "$socket" "$session" "$(date +%s)" > "$recovery_file"
+  printf '%s|%s|%s|%s|%s\n' \
+    "${NODE_IDS[$index]}" "$socket" "$session" "$(date +%s)" "$$" > "$recovery_file"
   chmod 600 "$recovery_file" 2>/dev/null || true
   ACTIVE_RECOVERY_FILE="$recovery_file"
 }
@@ -336,16 +336,70 @@ clear_recovery() {
   fi
 }
 
+recovery_owner_is_active() {
+  local recovery_file="$1"
+  local _node_id _socket _session _saved_at owner_pid extra
+  IFS='|' read -r _node_id _socket _session _saved_at owner_pid extra < "$recovery_file" || return 1
+  [ -z "$extra" ] || return 1
+  case "$owner_pid" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  [ "$owner_pid" -gt 1 ] 2>/dev/null || return 1
+  kill -0 "$owner_pid" 2>/dev/null
+}
+
 newest_recovery_file() {
   local recovery_file newest=""
   for recovery_file in "$RECOVERY_DIR"/*.state; do
     [ -f "$recovery_file" ] || continue
+    recovery_owner_is_active "$recovery_file" && continue
     if [ -z "$newest" ] || [ "$recovery_file" -nt "$newest" ]; then
       newest="$recovery_file"
     fi
   done
   [ -n "$newest" ] || return 1
   REPLY="$newest"
+}
+
+claim_recovery() {
+  local recovery_file="$1"
+  local node_id="$2"
+  local socket="$3"
+  local session="$4"
+  local claim_file="$recovery_file.claim"
+  local claim_owner temp_file
+
+  if ! (set -o noclobber; printf '%s\n' "$$" > "$claim_file") 2>/dev/null; then
+    claim_owner=""
+    IFS= read -r claim_owner < "$claim_file" 2>/dev/null || true
+    case "$claim_owner" in
+      ''|*[!0-9]*) ;;
+      *)
+        if [ "$claim_owner" -gt 1 ] 2>/dev/null && kill -0 "$claim_owner" 2>/dev/null; then
+          return 1
+        fi
+        ;;
+    esac
+    rm -f "$claim_file"
+    (set -o noclobber; printf '%s\n' "$$" > "$claim_file") 2>/dev/null || return 1
+  fi
+
+  if [ ! -f "$recovery_file" ]; then
+    rm -f "$claim_file"
+    return 1
+  fi
+
+  temp_file="$recovery_file.tmp.$$"
+  umask 077
+  if ! printf '%s|%s|%s|%s|%s\n' \
+    "$node_id" "$socket" "$session" "$(date +%s)" "$$" > "$temp_file" ||
+     ! mv "$temp_file" "$recovery_file"; then
+    rm -f "$temp_file" "$claim_file"
+    return 1
+  fi
+  chmod 600 "$recovery_file" 2>/dev/null || true
+  rm -f "$claim_file"
+  ACTIVE_RECOVERY_FILE="$recovery_file"
 }
 
 build_ssh_args() {
@@ -707,11 +761,11 @@ connect_node() {
 }
 
 try_auto_resume() {
-  local recovery_file node_id socket session _saved_at extra resume_rc session_state index
+  local recovery_file node_id socket session _saved_at owner_pid extra resume_rc session_state index
 
   while newest_recovery_file; do
     recovery_file="$REPLY"
-    IFS='|' read -r node_id socket session _saved_at extra < "$recovery_file" || {
+    IFS='|' read -r node_id socket session _saved_at owner_pid extra < "$recovery_file" || {
       clear_recovery "$recovery_file"
       continue
     }
@@ -719,6 +773,9 @@ try_auto_resume() {
       clear_recovery "$recovery_file"
       continue
     fi
+    case "$owner_pid" in
+      ''|*[!0-9]*) [ -z "$owner_pid" ] || { clear_recovery "$recovery_file"; continue; } ;;
+    esac
     if ! find_node_index "$node_id"; then
       clear_recovery "$recovery_file"
       continue
@@ -732,7 +789,7 @@ try_auto_resume() {
       continue
     fi
 
-    ACTIVE_RECOVERY_FILE="$recovery_file"
+    claim_recovery "$recovery_file" "$node_id" "$socket" "$session" || return 1
     header
     printf '\033[1m正在自动恢复 · Auto-resuming\033[0m\n\n'
     printf '%s\n' "${NODE_LABELS[$index]}"

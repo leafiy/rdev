@@ -182,7 +182,8 @@ network loss. SSH connections retry and reattach the same tmux session.
 If the local terminal or rdev process disappears unexpectedly, rdev leaves a
 small recovery record in `~/.config/rdev/recovery.d`. The next `rdev` launch
 checks that the exact remote tmux session still exists and attaches it
-automatically.
+automatically. Recovery records owned by another live local `rdev` process are
+ignored, so opening a second terminal shows the node and tmux session menus.
 
 正常退出、右键选择断开、tmux 会话结束或按 Ctrl-C 时会清理恢复记录，不会误触发
 重连。关闭终端、电脑休眠、网络中断或 rdev 意外结束时会保留记录，下次启动自动
@@ -217,6 +218,7 @@ To remove configuration too, download the repository and run:
 ```sh
 ./tests/test_syntax.sh
 ./tests/test_cli.sh
+./tests/test_active_connection.sh
 ./install.sh
 ```
 
