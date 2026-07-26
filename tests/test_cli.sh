@@ -12,8 +12,10 @@ run_rdev() {
   "$ROOT/bin/rdev" "$@"
 }
 
-run_rdev version | grep -q '^rdev 0.1.0$'
+run_rdev version | grep -q '^rdev 0.2.0$'
 run_rdev list | grep -q '^No nodes configured\.$'
+grep -q '^auto_resume=yes$' "$TEMP/config/config"
+run_rdev resume | grep -q '^No interrupted rdev session is waiting to be restored\.$'
 
 run_rdev add "Build server" 10.20.30.40 \
   --id build \
@@ -35,6 +37,10 @@ fi
 
 run_rdev remove build | grep -q '^Removed node: build$'
 run_rdev list | grep -q '^No nodes configured\.$'
+
+printf 'missing|rdev-missing|work|0\n' > "$TEMP/config/recovery.d/missing--work.state"
+run_rdev resume | grep -q '^No interrupted rdev session is waiting to be restored\.$'
+test ! -e "$TEMP/config/recovery.d/missing--work.state"
 
 cat > "$TEMP/config/ssh_config" <<'EOF'
 Host rdev-legacy

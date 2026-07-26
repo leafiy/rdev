@@ -5,7 +5,7 @@
 
 set -o pipefail
 
-RDEV_VERSION="0.1.0"
+RDEV_VERSION="0.2.0"
 APP_NAME="${RDEV_APP_NAME:-rdev · 远程开发}"
 SCRIPT_DIR="$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)"
 CONFIG_DIR="${RDEV_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/rdev}"
@@ -15,6 +15,7 @@ SETTINGS_FILE="$CONFIG_DIR/config"
 SSH_CONFIG="$CONFIG_DIR/ssh_config"
 STATE_FILE="$CONFIG_DIR/last-node"
 CONTROL_DIR="$CONFIG_DIR/control"
+RECOVERY_DIR="$CONFIG_DIR/recovery.d"
 
 SSH_BIN="${RDEV_SSH_BIN:-$(command -v ssh 2>/dev/null || printf ssh)}"
 RUNTIME_DIR=""
@@ -37,8 +38,10 @@ NODE_SSH_ARGS=()
 
 AUTO_INSTALL_REMOTE="yes"
 AUTO_FALLBACK_SSH="yes"
+AUTO_RESUME="yes"
 CONNECT_TIMEOUT="10"
 MOSH_PREDICT="adaptive"
+ACTIVE_RECOVERY_FILE=""
 
 # These scripts intentionally expand only on the remote host.
 # shellcheck disable=SC2016
@@ -111,14 +114,19 @@ cleanup_screen() {
 
 abort_rdev() {
   local exit_code="$1"
+  local clear_recovery="${2:-no}"
   trap - HUP INT TERM
+  if [ "$clear_recovery" = "yes" ] && [ -n "$ACTIVE_RECOVERY_FILE" ]; then
+    rm -f "$ACTIVE_RECOVERY_FILE"
+    ACTIVE_RECOVERY_FILE=""
+  fi
   printf '\n'
   exit "$exit_code"
 }
 
 install_ui_traps() {
   trap cleanup_screen EXIT
-  trap 'abort_rdev 130' INT
+  trap 'abort_rdev 130 yes' INT
   trap 'abort_rdev 129' HUP
   trap 'abort_rdev 143' TERM
 }
@@ -151,6 +159,7 @@ write_default_settings() {
       '# rdev settings' \
       'auto_install_remote=yes' \
       'auto_fallback_ssh=yes' \
+      'auto_resume=yes' \
       'connect_timeout=10' \
       'mosh_predict=adaptive'
   } > "$SETTINGS_FILE"
@@ -167,15 +176,22 @@ write_default_ssh_config() {
   } > "$SSH_CONFIG"
 }
 
+ensure_setting() {
+  local key="$1"
+  local value="$2"
+  grep -q "^${key}=" "$SETTINGS_FILE" 2>/dev/null || printf '%s=%s\n' "$key" "$value" >> "$SETTINGS_FILE"
+}
+
 init_config() {
   umask 077
-  mkdir -p "$CONFIG_DIR" "$CONTROL_DIR"
-  chmod 700 "$CONFIG_DIR" "$CONTROL_DIR" 2>/dev/null || true
+  mkdir -p "$CONFIG_DIR" "$CONTROL_DIR" "$RECOVERY_DIR"
+  chmod 700 "$CONFIG_DIR" "$CONTROL_DIR" "$RECOVERY_DIR" 2>/dev/null || true
   [ -e "$NODES_FILE" ] || {
     printf '%s\n' '# id|label|host|user|ssh_port|transport|tmux_socket|identity_file|proxy_jump|mosh_udp_port_or_range' > "$NODES_FILE"
   }
   chmod 600 "$NODES_FILE" 2>/dev/null || true
   write_default_settings
+  ensure_setting "auto_resume" "yes"
   write_default_ssh_config
 }
 
@@ -186,6 +202,7 @@ load_settings() {
       ''|\#*) continue ;;
       auto_install_remote) [ "$value" = "yes" ] || [ "$value" = "no" ] || continue; AUTO_INSTALL_REMOTE="$value" ;;
       auto_fallback_ssh) [ "$value" = "yes" ] || [ "$value" = "no" ] || continue; AUTO_FALLBACK_SSH="$value" ;;
+      auto_resume) [ "$value" = "yes" ] || [ "$value" = "no" ] || continue; AUTO_RESUME="$value" ;;
       connect_timeout) case "$value" in *[!0-9]*|'') continue ;; esac; CONNECT_TIMEOUT="$value" ;;
       mosh_predict) case "$value" in adaptive|always|never|experimental) MOSH_PREDICT="$value" ;; esac ;;
     esac
@@ -295,6 +312,40 @@ find_node_index() {
     i=$((i + 1))
   done
   return 1
+}
+
+record_recovery() {
+  local index="$1"
+  local socket="$2"
+  local session="$3"
+  local recovery_file
+  recovery_file="$RECOVERY_DIR/${NODE_IDS[$index]}--$session.state"
+  umask 077
+  printf '%s|%s|%s|%s\n' \
+    "${NODE_IDS[$index]}" "$socket" "$session" "$(date +%s)" > "$recovery_file"
+  chmod 600 "$recovery_file" 2>/dev/null || true
+  ACTIVE_RECOVERY_FILE="$recovery_file"
+}
+
+clear_recovery() {
+  local recovery_file="${1:-$ACTIVE_RECOVERY_FILE}"
+  [ -n "$recovery_file" ] || return 0
+  rm -f "$recovery_file"
+  if [ "$ACTIVE_RECOVERY_FILE" = "$recovery_file" ]; then
+    ACTIVE_RECOVERY_FILE=""
+  fi
+}
+
+newest_recovery_file() {
+  local recovery_file newest=""
+  for recovery_file in "$RECOVERY_DIR"/*.state; do
+    [ -f "$recovery_file" ] || continue
+    if [ -z "$newest" ] || [ "$recovery_file" -nt "$newest" ]; then
+      newest="$recovery_file"
+    fi
+  done
+  [ -n "$newest" ] || return 1
+  REPLY="$newest"
 }
 
 build_ssh_args() {
@@ -482,13 +533,19 @@ pick_session() {
 remote_attach_command() {
   local socket="$1"
   local session="$2"
-  local quoted_socket quoted_session quoted_window refresh_name runtime_config
+  local create_if_missing="${3:-yes}"
+  local quoted_socket quoted_session quoted_window refresh_name runtime_config ensure_session
   printf -v quoted_socket '%q' "$socket"
   printf -v quoted_session '%q' "$session"
   printf -v quoted_window '%q' "Shell"
   refresh_name="if [ -x \"\$HOME/.cache/rdev/bin/rdev-agent-name\" ]; then RDEV_CURRENT_NAME=\$(\"\$TMUX_BIN\" -L $quoted_socket display-message -p -t $quoted_session '#{window_name}'); case \"\$RDEV_CURRENT_NAME\" in Shell|bun|node|zsh|bash|sh|fish|python|python3|omp|pi|opencode|codex|claude|gemini|qwen|amp|aider|goose|copilot|crush|kimi) RDEV_PANE_PID=\$(\"\$TMUX_BIN\" -L $quoted_socket display-message -p -t $quoted_session '#{pane_pid}'); RDEV_AGENT_NAME=\$(\"\$HOME/.cache/rdev/bin/rdev-agent-name\" \"\$RDEV_PANE_PID\"); if [ -n \"\$RDEV_AGENT_NAME\" ]; then \"\$TMUX_BIN\" -L $quoted_socket rename-window -t $quoted_session \"\$RDEV_AGENT_NAME\"; \"\$TMUX_BIN\" -L $quoted_socket set-window-option -t $quoted_session automatic-rename off; fi;; esac; fi"
   runtime_config="\"\$TMUX_BIN\" -L $quoted_socket source-file \"\$HOME/.cache/rdev/bin/tmux.conf\" 2>/dev/null || true"
-  REPLY="$REMOTE_TMUX; cd \"\$HOME\" || exit 1; if ! \"\$TMUX_BIN\" -L $quoted_socket has-session -t $quoted_session 2>/dev/null; then \"\$TMUX_BIN\" -L $quoted_socket new-session -d -s $quoted_session -n $quoted_window; \"\$TMUX_BIN\" -L $quoted_socket set-window-option -t $quoted_session automatic-rename off; fi; $runtime_config; $refresh_name; \"\$TMUX_BIN\" -L $quoted_socket set-option -t $quoted_session mouse on; exec \"\$TMUX_BIN\" -L $quoted_socket attach-session -t $quoted_session"
+  if [ "$create_if_missing" = "yes" ]; then
+    ensure_session="if ! \"\$TMUX_BIN\" -L $quoted_socket has-session -t $quoted_session 2>/dev/null; then \"\$TMUX_BIN\" -L $quoted_socket new-session -d -s $quoted_session -n $quoted_window; \"\$TMUX_BIN\" -L $quoted_socket set-window-option -t $quoted_session automatic-rename off; fi"
+  else
+    ensure_session="\"\$TMUX_BIN\" -L $quoted_socket has-session -t $quoted_session 2>/dev/null || { echo 'The saved tmux session no longer exists.' >&2; exit 44; }"
+  fi
+  REPLY="$REMOTE_TMUX; cd \"\$HOME\" || exit 1; $ensure_session; $runtime_config; $refresh_name; \"\$TMUX_BIN\" -L $quoted_socket set-option -t $quoted_session mouse on; exec \"\$TMUX_BIN\" -L $quoted_socket attach-session -t $quoted_session"
 }
 
 remote_session_exists() {
@@ -507,9 +564,10 @@ connect_ssh() {
   local index="$1"
   local socket="$2"
   local session="$3"
+  local create_if_missing="${4:-yes}"
   local label="${NODE_LABELS[$index]}"
   local remote_command rc session_state seconds
-  remote_attach_command "$socket" "$session"
+  remote_attach_command "$socket" "$session" "$create_if_missing"
   remote_command="$REPLY"
   build_ssh_args "$index"
 
@@ -524,12 +582,15 @@ connect_ssh() {
     rc=$?
     [ "$rc" -ne 255 ] && return "$rc"
 
-    remote_session_exists "$index" "$socket" "$session"
+    create_if_missing="no"
+    remote_attach_command "$socket" "$session" "$create_if_missing"
+    remote_command="$REPLY"
+    remote_session_exists "$index" "$socket" "$session" >/dev/null 2>&1
     session_state=$?
     if [ "$session_state" -eq 1 ]; then
-      printf '\nThe tmux session exited normally; reconnect is disabled.\n'
+      printf '\nThe saved tmux session no longer exists; reconnect is disabled.\n'
       sleep 1
-      return 0
+      return 44
     fi
 
     seconds=3
@@ -574,6 +635,7 @@ connect_mosh() {
   local index="$1"
   local socket="$2"
   local session="$3"
+  local create_if_missing="${4:-yes}"
   local label="${NODE_LABELS[$index]}"
   local mosh_bin mosh_ssh remote_command started_at rc session_state seconds
   local -a mosh_args
@@ -581,7 +643,7 @@ connect_mosh() {
   if ! ensure_local_mosh; then
     printf 'Unable to install Mosh locally.\n' >&2
     if [ "$AUTO_FALLBACK_SSH" = "yes" ]; then
-      connect_ssh "$index" "$socket" "$session"
+      connect_ssh "$index" "$socket" "$session" "$create_if_missing"
       return $?
     fi
     return 127
@@ -589,7 +651,7 @@ connect_mosh() {
   mosh_bin="$REPLY"
   build_ssh_args "$index"
   printf -v mosh_ssh '%q ' "$SSH_BIN" "${NODE_SSH_ARGS[@]}"
-  remote_attach_command "$socket" "$session"
+  remote_attach_command "$socket" "$session" "$create_if_missing"
   remote_command="$REPLY"
 
   while true; do
@@ -605,19 +667,22 @@ connect_mosh() {
     rc=$?
     [ "$rc" -eq 0 ] && return 0
 
+    create_if_missing="no"
+    remote_attach_command "$socket" "$session" "$create_if_missing"
+    remote_command="$REPLY"
     if [ $((SECONDS - started_at)) -lt 15 ] && [ "$AUTO_FALLBACK_SSH" = "yes" ]; then
       printf '\n\033[33mMosh UDP startup failed; falling back to SSH automatically.\033[0m\n'
       sleep 1
-      connect_ssh "$index" "$socket" "$session"
+      connect_ssh "$index" "$socket" "$session" "$create_if_missing"
       return $?
     fi
 
-    remote_session_exists "$index" "$socket" "$session"
+    remote_session_exists "$index" "$socket" "$session" >/dev/null 2>&1
     session_state=$?
     if [ "$session_state" -eq 1 ]; then
-      printf '\nThe tmux session exited normally; reconnect is disabled.\n'
+      printf '\nThe saved tmux session no longer exists; reconnect is disabled.\n'
       sleep 1
-      return 0
+      return 44
     fi
 
     seconds=3
@@ -634,16 +699,88 @@ connect_node() {
   local index="$1"
   local socket="$2"
   local session="$3"
+  local create_if_missing="${4:-yes}"
   case "${NODE_TRANSPORTS[$index]}" in
-    mosh) connect_mosh "$index" "$socket" "$session" ;;
-    *) connect_ssh "$index" "$socket" "$session" ;;
+    mosh) connect_mosh "$index" "$socket" "$session" "$create_if_missing" ;;
+    *) connect_ssh "$index" "$socket" "$session" "$create_if_missing" ;;
+  esac
+}
+
+try_auto_resume() {
+  local recovery_file node_id socket session _saved_at extra resume_rc session_state index
+
+  while newest_recovery_file; do
+    recovery_file="$REPLY"
+    IFS='|' read -r node_id socket session _saved_at extra < "$recovery_file" || {
+      clear_recovery "$recovery_file"
+      continue
+    }
+    if [ -n "$extra" ] || [ -z "$node_id" ] || [ -z "$socket" ] || [ -z "$session" ]; then
+      clear_recovery "$recovery_file"
+      continue
+    fi
+    if ! find_node_index "$node_id"; then
+      clear_recovery "$recovery_file"
+      continue
+    fi
+    index="$REPLY"
+
+    remote_session_exists "$index" "$socket" "$session" >/dev/null 2>&1
+    session_state=$?
+    if [ "$session_state" -eq 1 ]; then
+      clear_recovery "$recovery_file"
+      continue
+    fi
+
+    ACTIVE_RECOVERY_FILE="$recovery_file"
+    header
+    printf '\033[1m正在自动恢复 · Auto-resuming\033[0m\n\n'
+    printf '%s\n' "${NODE_LABELS[$index]}"
+    printf 'tmux: \033[36m%s\033[0m\n\n' "$session"
+    connect_node "$index" "$socket" "$session" "no"
+    resume_rc=$?
+    case "$resume_rc" in
+      0) clear_recovery "$recovery_file"; return 0 ;;
+      44) clear_recovery "$recovery_file"; return 2 ;;
+      *) return 3 ;;
+    esac
+  done
+  return 1
+}
+
+command_resume() {
+  local resume_rc
+  load_nodes || return 1
+  if ! newest_recovery_file; then
+    printf 'No interrupted rdev session is waiting to be restored.\n'
+    return 0
+  fi
+  install_ui_traps
+  try_auto_resume
+  resume_rc=$?
+  case "$resume_rc" in
+    0) return 0 ;;
+    1) printf 'No interrupted rdev session is waiting to be restored.\n'; return 0 ;;
+    2) printf 'The saved tmux session no longer exists.\n'; return 0 ;;
+    *) return 1 ;;
   esac
 }
 
 run_menu() {
-  local pick_rc
+  local allow_resume="${1:-yes}"
+  local pick_rc connect_rc resume_rc
   install_ui_traps
   load_nodes || return 1
+  if [ "$allow_resume" = "yes" ] && [ "$AUTO_RESUME" = "yes" ]; then
+    try_auto_resume
+    resume_rc=$?
+    case "$resume_rc" in
+      0) return 0 ;;
+      1|2) ;;
+      *) return 1 ;;
+    esac
+  fi
+
   while true; do
     pick_node
     pick_rc=$?
@@ -654,8 +791,14 @@ run_menu() {
     pick_rc=$?
     [ "$pick_rc" -eq 1 ] && continue
     [ "$pick_rc" -eq 2 ] && continue
-    connect_node "$NODE_INDEX" "$SESSION_SOCKET" "$SESSION_NAME"
-    return $?
+    record_recovery "$NODE_INDEX" "$SESSION_SOCKET" "$SESSION_NAME"
+    connect_node "$NODE_INDEX" "$SESSION_SOCKET" "$SESSION_NAME" "yes"
+    connect_rc=$?
+    case "$connect_rc" in
+      0) clear_recovery; return 0 ;;
+      44) clear_recovery; continue ;;
+      *) return "$connect_rc" ;;
+    esac
   done
 }
 
@@ -839,6 +982,8 @@ rdev $RDEV_VERSION — SSH/Mosh + tmux without commands to remember
 
 Usage:
   rdev                         Open the node and tmux menu
+  rdev resume                  Restore an interrupted session now
+  rdev menu                    Open the menu without auto-resume
   rdev add [NAME HOST] [...]   Add a node (interactive when omitted)
   rdev list                   List configured nodes
   rdev remove ID|NUMBER       Remove a node
@@ -863,13 +1008,15 @@ main() {
   [ "$#" -gt 0 ] && shift
   case "$command_name" in
     '') run_menu ;;
+    resume) command_resume ;;
+    menu) run_menu "no" ;;
     add) command_add "$@" ;;
     list|ls) command_list ;;
     remove|rm|delete) command_remove "$@" ;;
     edit) "${EDITOR:-vi}" "$NODES_FILE" ;;
     config)
-      printf 'config=%s\nnodes=%s\nssh_config=%s\nruntime=%s\n' \
-        "$SETTINGS_FILE" "$NODES_FILE" "$SSH_CONFIG" "$RUNTIME_DIR"
+      printf 'config=%s\nnodes=%s\nssh_config=%s\nrecovery=%s\nruntime=%s\n' \
+        "$SETTINGS_FILE" "$NODES_FILE" "$SSH_CONFIG" "$RECOVERY_DIR" "$RUNTIME_DIR"
       ;;
     doctor) command_doctor ;;
     version|--version|-V) printf 'rdev %s\n' "$RDEV_VERSION" ;;
