@@ -38,7 +38,6 @@ NODE_SSH_ARGS=()
 
 AUTO_INSTALL_REMOTE="yes"
 AUTO_FALLBACK_SSH="yes"
-AUTO_RESUME="yes"
 CONNECT_TIMEOUT="10"
 MOSH_PREDICT="adaptive"
 ACTIVE_RECOVERY_FILE=""
@@ -159,7 +158,6 @@ write_default_settings() {
       '# rdev settings' \
       'auto_install_remote=yes' \
       'auto_fallback_ssh=yes' \
-      'auto_resume=yes' \
       'connect_timeout=10' \
       'mosh_predict=adaptive'
   } > "$SETTINGS_FILE"
@@ -176,12 +174,6 @@ write_default_ssh_config() {
   } > "$SSH_CONFIG"
 }
 
-ensure_setting() {
-  local key="$1"
-  local value="$2"
-  grep -q "^${key}=" "$SETTINGS_FILE" 2>/dev/null || printf '%s=%s\n' "$key" "$value" >> "$SETTINGS_FILE"
-}
-
 init_config() {
   umask 077
   mkdir -p "$CONFIG_DIR" "$CONTROL_DIR" "$RECOVERY_DIR"
@@ -191,7 +183,6 @@ init_config() {
   }
   chmod 600 "$NODES_FILE" 2>/dev/null || true
   write_default_settings
-  ensure_setting "auto_resume" "yes"
   write_default_ssh_config
 }
 
@@ -202,7 +193,6 @@ load_settings() {
       ''|\#*) continue ;;
       auto_install_remote) [ "$value" = "yes" ] || [ "$value" = "no" ] || continue; AUTO_INSTALL_REMOTE="$value" ;;
       auto_fallback_ssh) [ "$value" = "yes" ] || [ "$value" = "no" ] || continue; AUTO_FALLBACK_SSH="$value" ;;
-      auto_resume) [ "$value" = "yes" ] || [ "$value" = "no" ] || continue; AUTO_RESUME="$value" ;;
       connect_timeout) case "$value" in *[!0-9]*|'') continue ;; esac; CONNECT_TIMEOUT="$value" ;;
       mosh_predict) case "$value" in adaptive|always|never|experimental) MOSH_PREDICT="$value" ;; esac ;;
     esac
@@ -513,20 +503,24 @@ prepare_remote() {
 fetch_sessions() {
   local index="$1"
   local managed_socket="${NODE_TMUX_SOCKETS[$index]}"
-  local output rc socket name windows attached description
+  local output rc name windows attached extra description
+  local quoted_socket quoted_format
   SESSION_SOCKETS=()
   SESSION_NAMES=()
   SESSION_DESCRIPTIONS=()
   build_ssh_args "$index"
+  printf -v quoted_socket '%q' "$managed_socket"
+  printf -v quoted_format '%q' '#{session_name}|#{session_windows}|#{session_attached}'
 
   output="$("$SSH_BIN" -T -n "${NODE_SSH_ARGS[@]}" "${NODE_HOSTS[$index]}" \
-    "$REMOTE_TMUX; \"\$TMUX_BIN\" -L $(printf '%q' "$managed_socket") list-sessions -F \"$(printf '%q' "$managed_socket")\\t#{session_name}\\t#{session_windows}\\t#{session_attached}\" 2>/dev/null || true")"
+    "$REMOTE_TMUX; \"\$TMUX_BIN\" -L $quoted_socket list-sessions -F $quoted_format 2>/dev/null || true")"
   rc=$?
   [ "$rc" -ne 0 ] && return "$rc"
 
-  while IFS=$'\t' read -r socket name windows attached; do
+  while IFS='|' read -r name windows attached extra; do
+    [ -z "$extra" ] || continue
     [ -n "$name" ] || continue
-    SESSION_SOCKETS[${#SESSION_SOCKETS[@]}]="$socket"
+    SESSION_SOCKETS[${#SESSION_SOCKETS[@]}]="$managed_socket"
     SESSION_NAMES[${#SESSION_NAMES[@]}]="$name"
     description="$name  ·  $windows window(s)"
     [ "${attached:-0}" -gt 0 ] 2>/dev/null && description="$description  ·  attached"
@@ -760,7 +754,7 @@ connect_node() {
   esac
 }
 
-try_auto_resume() {
+try_resume() {
   local recovery_file node_id socket session _saved_at owner_pid extra resume_rc session_state index
 
   while newest_recovery_file; do
@@ -791,7 +785,7 @@ try_auto_resume() {
 
     claim_recovery "$recovery_file" "$node_id" "$socket" "$session" || return 1
     header
-    printf '\033[1m正在自动恢复 · Auto-resuming\033[0m\n\n'
+    printf '\033[1m正在恢复 · Restoring\033[0m\n\n'
     printf '%s\n' "${NODE_LABELS[$index]}"
     printf 'tmux: \033[36m%s\033[0m\n\n' "$session"
     connect_node "$index" "$socket" "$session" "no"
@@ -813,7 +807,7 @@ command_resume() {
     return 0
   fi
   install_ui_traps
-  try_auto_resume
+  try_resume
   resume_rc=$?
   case "$resume_rc" in
     0) return 0 ;;
@@ -824,19 +818,9 @@ command_resume() {
 }
 
 run_menu() {
-  local allow_resume="${1:-yes}"
-  local pick_rc connect_rc resume_rc
+  local pick_rc connect_rc
   install_ui_traps
   load_nodes || return 1
-  if [ "$allow_resume" = "yes" ] && [ "$AUTO_RESUME" = "yes" ]; then
-    try_auto_resume
-    resume_rc=$?
-    case "$resume_rc" in
-      0) return 0 ;;
-      1|2) ;;
-      *) return 1 ;;
-    esac
-  fi
 
   while true; do
     pick_node
@@ -1040,7 +1024,7 @@ rdev $RDEV_VERSION — SSH/Mosh + tmux without commands to remember
 Usage:
   rdev                         Open the node and tmux menu
   rdev resume                  Restore an interrupted session now
-  rdev menu                    Open the menu without auto-resume
+  rdev menu                    Open the node and tmux menu
   rdev add [NAME HOST] [...]   Add a node (interactive when omitted)
   rdev list                   List configured nodes
   rdev remove ID|NUMBER       Remove a node
@@ -1066,7 +1050,7 @@ main() {
   case "$command_name" in
     '') run_menu ;;
     resume) command_resume ;;
-    menu) run_menu "no" ;;
+    menu) run_menu ;;
     add) command_add "$@" ;;
     list|ls) command_list ;;
     remove|rm|delete) command_remove "$@" ;;

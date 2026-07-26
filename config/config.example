@@ -1,6 +1,5 @@
 # rdev settings
 auto_install_remote=yes
 auto_fallback_ssh=yes
-auto_resume=yes
 connect_timeout=10
 mosh_predict=adaptive

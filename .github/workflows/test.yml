@@ -18,3 +18,7 @@ jobs:
         run: ./tests/test_cli.sh
       - name: Active connection recovery
         run: ./tests/test_active_connection.sh
+      - name: Session listing
+        run: ./tests/test_session_listing.sh
+      - name: Mouse input
+        run: ./tests/test_mouse_input.sh

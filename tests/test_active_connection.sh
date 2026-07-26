@@ -73,7 +73,7 @@ done
 
 printf 'q\n' | run_rdev >"$TEMP/second.out" 2>&1
 
-if grep -q 'Auto-resuming' "$TEMP/second.out"; then
+if grep -q 'Restoring' "$TEMP/second.out"; then
   printf 'a second terminal auto-attached the active tmux session\n' >&2
   exit 1
 fi
@@ -87,13 +87,20 @@ kill -9 "$OWNER_PID"
 wait "$FIRST_PID" 2>/dev/null || true
 FIRST_PID=""
 
-run_rdev >"$TEMP/third.out" 2>&1
-grep -q 'Auto-resuming' "$TEMP/third.out"
+printf 'q\n' | run_rdev >"$TEMP/third.out" 2>&1
+if grep -q 'Restoring' "$TEMP/third.out"; then
+  printf 'a normal launch auto-resumed a crashed connection\n' >&2
+  exit 1
+fi
+grep -q 'Select a node' "$TEMP/third.out"
+
+run_rdev resume >"$TEMP/resume.out" 2>&1
+grep -q 'Restoring' "$TEMP/resume.out"
 
 printf 'build|rdev-build|legacy|0\n' > \
   "$TEMP/config/recovery.d/build--legacy.state"
-run_rdev >"$TEMP/legacy.out" 2>&1
-grep -q 'Auto-resuming' "$TEMP/legacy.out"
+run_rdev resume >"$TEMP/legacy.out" 2>&1
+grep -q 'Restoring' "$TEMP/legacy.out"
 
 touch "$TEMP/release-first-attach"
 

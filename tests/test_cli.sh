@@ -14,7 +14,7 @@ run_rdev() {
 
 run_rdev version | grep -q '^rdev 0.2.0$'
 run_rdev list | grep -q '^No nodes configured\.$'
-grep -q '^auto_resume=yes$' "$TEMP/config/config"
+! grep -q '^auto_resume=' "$TEMP/config/config"
 run_rdev resume | grep -q '^No interrupted rdev session is waiting to be restored\.$'
 
 run_rdev add "Build server" 10.20.30.40 \

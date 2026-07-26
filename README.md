@@ -63,7 +63,7 @@ remote node. It syncs only small runtime helpers into
 ```text
 rdev                         Open the node/tmux menu
 rdev resume                  Restore an interrupted session now
-rdev menu                    Open the menu without auto-resume
+rdev menu                    Open the node and tmux menu
 rdev add [NAME HOST] [...]   Add a node
 rdev list                    List nodes
 rdev remove ID|NUMBER        Remove a node
@@ -96,9 +96,9 @@ Run `rdev add --help` for the complete reference.
 - Mosh roaming and network recovery; SSH reconnect fallback when UDP is blocked.
 - Automatic reattachment to the same tmux session after an SSH/Mosh disconnect.
 - Crash-safe session recovery: if the terminal, launcher, or local computer
-  stops unexpectedly, the next `rdev` launch resumes the interrupted session.
+  stops unexpectedly, `rdev resume` restores the interrupted session.
 - No reconnect loop after a normal tmux exit.
-- Mouse wheel scrollback, persistent text selection, clipboard support, and a
+- Mouse wheel scrollback, text selection, clipboard support, and a
   tmux right-click menu.
 - Dynamic window labels for OMP, Pi, OpenCode, Codex, Claude, Gemini, Qwen,
   Aider, Goose, Copilot, Crush, Kimi, and other supported agents.
@@ -165,14 +165,13 @@ Mosh 会先通过 SSH 端口在容器内启动 `mosh-server`，再切换到 UDP�
 ```ini
 auto_install_remote=yes
 auto_fallback_ssh=yes
-auto_resume=yes
 connect_timeout=10
 mosh_predict=adaptive
 ```
 
 Set `auto_install_remote=no` when package installation must be managed
-separately. Set `auto_resume=no` to always show the node menu first; `rdev
-resume` can still restore an interrupted session manually.
+separately. A normal `rdev` launch always opens the node and tmux menus. Use
+`rdev resume` explicitly when you want to restore an interrupted session.
 
 ## Session recovery / 会话恢复
 
@@ -180,14 +179,13 @@ While rdev is running, Mosh survives roaming, Wi-Fi changes, and temporary
 network loss. SSH connections retry and reattach the same tmux session.
 
 If the local terminal or rdev process disappears unexpectedly, rdev leaves a
-small recovery record in `~/.config/rdev/recovery.d`. The next `rdev` launch
-checks that the exact remote tmux session still exists and attaches it
-automatically. Recovery records owned by another live local `rdev` process are
-ignored, so opening a second terminal shows the node and tmux session menus.
+small recovery record in `~/.config/rdev/recovery.d`. `rdev resume` checks that
+the exact remote tmux session still exists and attaches it. A normal `rdev`
+launch always shows the node and tmux session menus.
 
 正常退出、右键选择断开、tmux 会话结束或按 Ctrl-C 时会清理恢复记录，不会误触发
-重连。关闭终端、电脑休眠、网络中断或 rdev 意外结束时会保留记录，下次启动自动
-回到同一个远端 tmux 会话。
+重连。关闭终端、电脑休眠、网络中断或 rdev 意外结束时会保留记录；需要恢复时
+运行 `rdev resume`。普通 `rdev` 启动始终显示节点和 tmux 会话菜单。
 
 If the remote machine itself rebooted, its in-memory tmux server may be gone.
 rdev removes the stale recovery record and returns to the menu instead of
@@ -219,6 +217,8 @@ To remove configuration too, download the repository and run:
 ./tests/test_syntax.sh
 ./tests/test_cli.sh
 ./tests/test_active_connection.sh
+./tests/test_session_listing.sh
+./tests/test_mouse_input.sh
 ./install.sh
 ```
 
