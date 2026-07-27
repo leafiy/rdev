@@ -15,6 +15,7 @@ run_rdev() {
 run_rdev version | grep -q '^rdev 0.2.0$'
 run_rdev list | grep -q '^No nodes configured\.$'
 ! grep -q '^auto_resume=' "$TEMP/config/config"
+grep -q '^mosh_predict=always$' "$TEMP/config/config"
 run_rdev resume | grep -q '^No interrupted rdev session is waiting to be restored\.$'
 
 run_rdev add "Build server" 10.20.30.40 \
@@ -56,5 +57,10 @@ EOF
 run_rdev version >/dev/null
 grep -q '^legacy|Legacy node|rdev-legacy|root|2202|ssh|rdev-legacy|||$' "$TEMP/config/nodes.conf"
 test -n "$(find "$TEMP/config" -name 'nodes.conf.legacy.*' -print -quit)"
+
+RDEV_BIN_DIR="$TEMP/install/bin" \
+RDEV_DATA_DIR="$TEMP/install/data" \
+  "$ROOT/install.sh" >/dev/null
+test -x "$TEMP/install/bin/rdev"
 
 printf 'CLI tests passed.\n'

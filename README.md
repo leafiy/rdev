@@ -166,12 +166,15 @@ Mosh 会先通过 SSH 端口在容器内启动 `mosh-server`，再切换到 UDP�
 auto_install_remote=yes
 auto_fallback_ssh=yes
 connect_timeout=10
-mosh_predict=adaptive
+mosh_predict=always
 ```
 
 Set `auto_install_remote=no` when package installation must be managed
 separately. A normal `rdev` launch always opens the node and tmux menus. Use
 `rdev resume` explicitly when you want to restore an interrupted session.
+`mosh_predict=always` keeps keyboard echo responsive through the tmux layer.
+Use `adaptive` if occasional prediction corrections are more distracting than
+waiting for the remote echo.
 
 ## Session recovery / 会话恢复
 

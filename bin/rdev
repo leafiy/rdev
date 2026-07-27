@@ -39,7 +39,7 @@ NODE_SSH_ARGS=()
 AUTO_INSTALL_REMOTE="yes"
 AUTO_FALLBACK_SSH="yes"
 CONNECT_TIMEOUT="10"
-MOSH_PREDICT="adaptive"
+MOSH_PREDICT="always"
 ACTIVE_RECOVERY_FILE=""
 
 # These scripts intentionally expand only on the remote host.
@@ -159,7 +159,7 @@ write_default_settings() {
       'auto_install_remote=yes' \
       'auto_fallback_ssh=yes' \
       'connect_timeout=10' \
-      'mosh_predict=adaptive'
+      'mosh_predict=always'
   } > "$SETTINGS_FILE"
 }
 

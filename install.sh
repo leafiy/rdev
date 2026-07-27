@@ -10,7 +10,9 @@ SOURCE_DIR=""
 TEMP_DIR=""
 
 cleanup() {
-  [ -n "$TEMP_DIR" ] && rm -rf "$TEMP_DIR"
+  if [ -n "$TEMP_DIR" ]; then
+    rm -rf "$TEMP_DIR"
+  fi
 }
 trap cleanup EXIT HUP INT TERM
 
