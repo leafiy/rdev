@@ -1,7 +1,0 @@
-#!/bin/sh
-
-runtime_dir=${0%/*}
-if command -v python3 >/dev/null 2>&1; then
-  exec python3 "$runtime_dir/rdev-token-status.py" "$@"
-fi
-printf 'Token 总 -- · 当前对话 --'

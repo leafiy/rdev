@@ -3,105 +3,64 @@
 set -eu
 
 ROOT="$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)"
-TEMP="$(mktemp -d "${TMPDIR:-/tmp}/rdev-active-test.XXXXXX")"
-FIRST_PID=""
-
-cleanup() {
-  touch "$TEMP/release-first-attach" 2>/dev/null || true
-  if [ -n "$FIRST_PID" ]; then
-    wait "$FIRST_PID" 2>/dev/null || true
-  fi
-  rm -rf "$TEMP"
-}
-trap cleanup EXIT HUP INT TERM
-
+TEMP="$(mktemp -d "${TMPDIR:-/tmp}/rdev-dtach-connection.XXXXXX")"
+trap 'rm -rf "$TEMP"' EXIT HUP INT TERM
 mkdir -p "$TEMP/bin" "$TEMP/config"
 
 cat > "$TEMP/bin/ssh" <<'EOF'
 #!/usr/bin/env bash
-
 set -eu
-
 printf '%s\n' "$*" >> "$RDEV_FAKE_STATE/ssh-calls"
-
-case "$*" in
-  *list-sessions*)
+case " $* " in
+  *' rdev_auto_install='*)
+    cat > "$RDEV_FAKE_STATE/remote-prepare"
     exit 0
     ;;
-  *attach-session*)
-    if mkdir "$RDEV_FAKE_STATE/first-attach.lock" 2>/dev/null; then
-      touch "$RDEV_FAKE_STATE/first-attach-ready"
-      while [ ! -e "$RDEV_FAKE_STATE/release-first-attach" ]; do
-        sleep 0.05
-      done
-    fi
-    exit 0
-    ;;
-  *has-session*)
+  *' rdev_session='*)
+    printf '%s\n' "$*" >> "$RDEV_FAKE_STATE/attach-calls"
+    count=0
+    [ ! -r "$RDEV_FAKE_STATE/attach-count" ] || count="$(cat "$RDEV_FAKE_STATE/attach-count")"
+    count=$((count + 1))
+    printf '%s\n' "$count" > "$RDEV_FAKE_STATE/attach-count"
+    [ "$count" -ne 1 ] || exit 255
     exit 0
     ;;
 esac
-
-cat >/dev/null || true
+exit 2
 EOF
 chmod +x "$TEMP/bin/ssh"
 
 run_rdev() {
   RDEV_CONFIG_DIR="$TEMP/config" \
-  RDEV_RUNTIME_DIR="$ROOT/lib" \
   RDEV_SSH_BIN="$TEMP/bin/ssh" \
   RDEV_FAKE_STATE="$TEMP" \
-  "$ROOT/bin/rdev" "$@"
+    "$ROOT/bin/rdev" "$@"
 }
 
-run_rdev add "Build server" 192.0.2.10 --id build --user deploy >/dev/null
+run_rdev add "Build server" build-alias \
+  --id build --user deploy --port 2224 \
+  --identity "/tmp/key'one" --proxy-jump bastion >/dev/null
+cat > "$TEMP/config/config" <<'EOF'
+# rdev settings
+auto_install_remote=yes
+connect_timeout=10
+reconnect_delay=0
+EOF
 
-printf '1\n1\nwork\n' | run_rdev >"$TEMP/first.out" 2>&1 &
-FIRST_PID=$!
+printf '1\n1\nwork\n' | run_rdev > "$TEMP/menu.out" 2> "$TEMP/menu.err"
 
-attempt=0
-while [ ! -e "$TEMP/first-attach-ready" ]; do
-  attempt=$((attempt + 1))
-  if [ "$attempt" -ge 100 ]; then
-    printf 'first rdev connection did not reach tmux attach\n' >&2
-    sed -n '1,160p' "$TEMP/first.out" >&2
-    sed -n '1,160p' "$TEMP/ssh-calls" >&2
-    exit 1
-  fi
-  sleep 0.05
-done
+grep -q 'rdev_auto_install=yes exec sh -s$' "$TEMP/ssh-calls"
+grep -q 'apt-get install -y -qq dtach' "$TEMP/remote-prepare"
+grep -q -- "-p 2224 -l deploy .* -i /tmp/key'one -J bastion .*build-alias rdev_session=s[0-9]* exec sh -c" "$TEMP/attach-calls"
+grep -q 'exec dtach -A' "$TEMP/attach-calls"
+grep -q 'Disconnected; reconnecting in 0s' "$TEMP/menu.err"
+test "$(cat "$TEMP/attach-count")" -eq 2
+test "$(sed -n 's/.*rdev_session=\(s[0-9][0-9]*\).*/\1/p' "$TEMP/attach-calls" | sort -u | wc -l | tr -d ' ')" -eq 1
+grep -q '^build|work$' "$TEMP/config/workspaces.conf"
+grep -q '^build|work$' "$TEMP/config/last-connection"
 
-printf 'q\n' | run_rdev >"$TEMP/second.out" 2>&1
+run_rdev resume > "$TEMP/resume.out"
+test "$(cat "$TEMP/attach-count")" -eq 3
+test "$(sed -n 's/.*rdev_session=\(s[0-9][0-9]*\).*/\1/p' "$TEMP/attach-calls" | sort -u | wc -l | tr -d ' ')" -eq 1
 
-if grep -q 'Restoring' "$TEMP/second.out"; then
-  printf 'a second terminal auto-attached the active tmux session\n' >&2
-  exit 1
-fi
-grep -q 'Select a node' "$TEMP/second.out"
-
-RECOVERY_FILE="$(find "$TEMP/config/recovery.d" -name '*.state' -print -quit)"
-test -n "$RECOVERY_FILE"
-OWNER_PID="$(awk -F'|' '{ print $5 }' "$RECOVERY_FILE")"
-test -n "$OWNER_PID"
-kill -9 "$OWNER_PID"
-wait "$FIRST_PID" 2>/dev/null || true
-FIRST_PID=""
-
-printf 'q\n' | run_rdev >"$TEMP/third.out" 2>&1
-if grep -q 'Restoring' "$TEMP/third.out"; then
-  printf 'a normal launch auto-resumed a crashed connection\n' >&2
-  exit 1
-fi
-grep -q 'Select a node' "$TEMP/third.out"
-
-run_rdev resume >"$TEMP/resume.out" 2>&1
-grep -q 'Restoring' "$TEMP/resume.out"
-
-printf 'build|rdev-build|legacy|0\n' > \
-  "$TEMP/config/recovery.d/build--legacy.state"
-run_rdev resume >"$TEMP/legacy.out" 2>&1
-grep -q 'Restoring' "$TEMP/legacy.out"
-
-touch "$TEMP/release-first-attach"
-
-printf 'Active connection test passed.\n'
+printf 'Current-terminal connection test passed.\n'

@@ -1,231 +1,281 @@
 # rdev
 
-Menu-driven remote development with SSH/Mosh + tmux. Pick a machine, pick a
-tmux session, and keep working through network changes without remembering
-connection commands or tmux shortcuts.
+[![test](https://github.com/leafiy/rdev/actions/workflows/test.yml/badge.svg)](https://github.com/leafiy/rdev/actions/workflows/test.yml)
 
-用菜单管理 SSH/Mosh + tmux 远程开发：选择主机、选择会话、直接工作。无需记忆
-主机端口、tmux 命令或断线恢复步骤。
+在你自己的终端里管理可恢复的远程开发会话。
 
-## Install / 安装
+`rdev` 提供一个简单的主机与工作区菜单，通过 SSH 连接远端，并使用轻量的
+`dtach` 保持远端 shell 存活。网络中断后自动重连；重新打开同一个工作区时，回到
+原来的 shell。它不会打开新的终端窗口，也不依赖 Mosh、tmux 或 WezTerm。
 
-```sh
+> Persistent remote shells in the terminal you already use. SSH for transport,
+> dtach for session persistence, and no extra terminal window.
+
+## 特性
+
+- 使用当前终端：支持 Otty、Terminal.app、iTerm2、Kitty、Ghostty 等。
+- 持久工作区：SSH 断开后，远端 shell 和其中运行的程序继续存在。
+- 自动重连：网络切换或临时断网后自动重新附加。
+- 原生终端交互：鼠标选择、滚轮、剪贴板、字体、配色和链接均由当前终端处理。
+- 主机菜单：保存多个节点、SSH 端口、密钥和跳板机配置。
+- 工作区菜单：每个节点可创建多个命名会话。
+- 自动安装：远端缺少 `dtach` 时可在首次连接时安装。
+- 配置隔离：所有文件都位于 `~/.config/rdev`，不修改 `~/.ssh/config`。
+- 兼容 Bash 3.2：可直接运行在 macOS 自带 Bash 上。
+
+## 工作方式
+
+```text
+当前终端 -> SSH -> dtach -> 远端登录 shell
+```
+
+`dtach` 只负责让远端进程脱离 SSH 连接继续运行，不解释终端输入和输出。因此，
+rdev 不会捕获鼠标，也不会引入 tmux copy-mode 一类的额外交互状态。
+
+连接意外中断时：
+
+1. 远端 `dtach` 会话继续运行；
+2. rdev 等待 `reconnect_delay` 秒；
+3. SSH 恢复后自动附加到同一个 shell。
+
+正常执行 `exit` 时，会话结束，rdev 不会重连。
+
+## 安装
+
+### 从 GitHub 安装
+
+```bash
+git clone https://github.com/leafiy/rdev.git
+cd rdev
+./install.sh
+```
+
+### 一行安装
+
+```bash
 curl -fsSL https://raw.githubusercontent.com/leafiy/rdev/main/install.sh | bash
 ```
 
-The installer places the executable in `~/.local/bin/rdev`, runtime helpers in
-`~/.local/share/rdev`, and preserves all configuration during upgrades.
+默认安装位置：
 
-安装器会把程序放到 `~/.local/bin/rdev`，运行组件放到
-`~/.local/share/rdev`；重复运行即可升级，不会覆盖节点配置。
+```text
+~/.local/bin/rdev
+```
 
-If `~/.local/bin` is not already in `PATH`:
+如果 `~/.local/bin` 不在 `PATH` 中：
 
-```sh
+```bash
 export PATH="$HOME/.local/bin:$PATH"
 ```
 
-## Quick start / 快速开始
+### 本机依赖
 
-Add a regular SSH node:
+- Bash 3.2 或更高版本；
+- OpenSSH；
+- 标准 `awk`、`sed`、`cksum` 工具。
 
-```sh
-rdev add "Work server" server.example.com --user developer
+本机不需要安装 `dtach`。它只运行在远端。
+
+## 快速开始
+
+### 添加节点
+
+```bash
+rdev add "Build server" 10.0.0.8 --user developer
 ```
 
-Add a Devbox/container whose SSH service listens on port 2224 and use Mosh:
+指定 SSH 端口、私钥和跳板机：
 
-```sh
-rdev add "Devbox" server.example.com --user root --port 2224 --mosh
+```bash
+rdev add "Devbox" devbox.example.com \
+  --user root \
+  --port 2224 \
+  --identity ~/.ssh/id_ed25519 \
+  --proxy-jump bastion
 ```
 
-Or let `rdev add` ask every question:
+也可以进入交互式添加流程：
 
-```sh
+```bash
 rdev add
 ```
 
-Then open the menu:
+### 打开远程工作区
 
-```sh
+```bash
 rdev
 ```
 
-On first connection, rdev can install `tmux`, `tar`, and `mosh-server` on the
-remote node. It syncs only small runtime helpers into
-`~/.cache/rdev/bin` on that node.
+依次选择：
 
-首次连接时，rdev 可以自动准备远端的 `tmux`、`tar` 和 `mosh-server`，并仅把
-少量状态栏组件同步到远端的 `~/.cache/rdev/bin`。
+1. 远程节点；
+2. 已有工作区，或创建新的命名工作区。
 
-## Commands / 命令
+SSH 会直接占用当前终端，不会打开其他应用或窗口。
+
+### 恢复上次工作区
+
+```bash
+rdev resume
+```
+
+## 会话控制
+
+| 操作 | 结果 |
+| --- | --- |
+| `exit` | 结束远端 shell 和对应工作区 |
+| `Ctrl-\` | 从 dtach 分离，但保留远端 shell |
+| `Ctrl-C` | 停止正在等待的自动重连 |
+| `rdev resume` | 重新进入上次节点和工作区 |
+
+## 命令
 
 ```text
-rdev                         Open the node/tmux menu
-rdev resume                  Restore an interrupted session now
-rdev menu                    Open the node and tmux menu
-rdev add [NAME HOST] [...]   Add a node
-rdev list                    List nodes
-rdev remove ID|NUMBER        Remove a node
-rdev edit                    Edit nodes.conf
-rdev config                  Show all configuration paths
-rdev doctor                  Check the local installation
-rdev version                 Show the installed version
+rdev                         打开节点与工作区菜单
+rdev resume                  恢复上次远程工作区
+rdev menu                    打开节点与工作区菜单
+rdev add [NAME HOST] [...]   添加节点；不带参数时使用交互模式
+rdev list                    列出节点
+rdev remove ID|NUMBER        删除节点
+rdev edit                    编辑节点配置
+rdev config                  显示配置文件路径
+rdev doctor                  检查本机依赖
+rdev version                 显示版本
+rdev help                    显示帮助
 ```
 
-Useful `add` options:
+查看添加节点的全部参数：
+
+```bash
+rdev add --help
+```
+
+## 配置
+
+所有状态都保存在：
 
 ```text
---user USER                  SSH user
---port PORT                  SSH port
---ssh / --mosh               Connection transport
---identity FILE              SSH private key
---proxy-jump HOST            SSH jump host
---socket NAME                Dedicated tmux socket
---mosh-port PORT[:PORT]      Published UDP port/range for a container
---id ID                      Stable node ID
+~/.config/rdev/config            通用设置
+~/.config/rdev/nodes.conf        节点定义
+~/.config/rdev/ssh_config        rdev 专用 SSH 配置
+~/.config/rdev/workspaces.conf   已知工作区
+~/.config/rdev/last-connection   上次节点和工作区
+~/.config/rdev/control/          OpenSSH ControlMaster socket
 ```
 
-Run `rdev add --help` for the complete reference.
-
-## What it handles / 自动处理
-
-- Separate SSH or Mosh transport per node.
-- Dedicated tmux socket and session picker per node.
-- New tmux sessions start from the remote account's `$HOME`.
-- Mosh roaming and network recovery; SSH reconnect fallback when UDP is blocked.
-- Automatic reattachment to the same tmux session after an SSH/Mosh disconnect.
-- Crash-safe session recovery: if the terminal, launcher, or local computer
-  stops unexpectedly, `rdev resume` restores the interrupted session.
-- No reconnect loop after a normal tmux exit.
-- Mouse wheel scrollback, text selection, clipboard support, and a
-  tmux right-click menu.
-- Dynamic window labels for OMP, Pi, OpenCode, Codex, Claude, Gemini, Qwen,
-  Aider, Goose, Copilot, Crush, Kimi, and other supported agents.
-- Total token history across supported installed agents; current-conversation
-  tokens appear only while an agent is active.
-- Remote-server date and time in the tmux status bar.
-
-所有处理仅作用于 rdev 管理的连接和 tmux socket，不会修改或接管普通的
-`ssh`、`mosh` 和其他终端会话。
-
-## Independent configuration / 独立配置
-
-rdev follows the XDG directory convention:
-
-```text
-~/.config/rdev/config       rdev behavior
-~/.config/rdev/nodes.conf   node definitions
-~/.config/rdev/ssh_config   optional rdev-only SSH options
-~/.local/share/rdev/        installed runtime helpers
-```
-
-Override paths with `RDEV_CONFIG_DIR`, `RDEV_DATA_DIR`, or `RDEV_BIN_DIR`.
-`rdev` never edits `~/.ssh/config`. Its own SSH config includes the user's
-normal SSH config read-only, so existing keys, aliases, and jump hosts still
-work.
-
-Node file format:
-
-```text
-id|label|host|user|ssh_port|transport|tmux_socket|identity_file|proxy_jump|mosh_udp_port_or_range
-```
-
-Use `rdev add` instead of editing it manually. Existing pre-0.1 four-column
-configurations are migrated automatically with a timestamped backup.
-
-## Mosh and containers / Mosh 与容器
-
-Mosh first uses SSH to launch `mosh-server`, then communicates over UDP. For a
-container using host networking, an SSH port such as 2224 is enough:
-
-```sh
-rdev add "Devbox" host.example.com --user root --port 2224 --mosh
-```
-
-For a bridge-network container, publish both SSH/TCP and a Mosh UDP port or
-range, then record that range:
-
-```sh
-rdev add "Devbox" host.example.com \
-  --user root --port 2224 --mosh --mosh-port 60000:60010
-```
-
-The container runtime must map `60000-60010/udp` to the same ports in the
-container. When Mosh cannot establish its UDP path, rdev automatically falls
-back to SSH unless `auto_fallback_ssh=no` is set.
-
-Mosh 会先通过 SSH 端口在容器内启动 `mosh-server`，再切换到 UDP。使用 host
-网络的容器无需额外映射；bridge 网络容器需要同时映射一段 UDP 端口。
-
-## Settings / 设置
-
-`~/.config/rdev/config`:
+### 通用设置
 
 ```ini
 auto_install_remote=yes
-auto_fallback_ssh=yes
 connect_timeout=10
-mosh_predict=always
+reconnect_delay=2
 ```
 
-Set `auto_install_remote=no` when package installation must be managed
-separately. A normal `rdev` launch always opens the node and tmux menus. Use
-`rdev resume` explicitly when you want to restore an interrupted session.
-`mosh_predict=always` keeps keyboard echo responsive through the tmux layer.
-Use `adaptive` if occasional prediction corrections are more distracting than
-waiting for the remote echo.
+| 设置 | 说明 |
+| --- | --- |
+| `auto_install_remote` | 远端缺少 dtach 时是否自动安装 |
+| `connect_timeout` | SSH 连接超时秒数 |
+| `reconnect_delay` | 意外断线后的重连等待秒数 |
 
-## Session recovery / 会话恢复
+设置 `auto_install_remote=no` 可以禁止修改远端软件包。
 
-While rdev is running, Mosh survives roaming, Wi-Fi changes, and temporary
-network loss. SSH connections retry and reattach the same tmux session.
+### 节点格式
 
-If the local terminal or rdev process disappears unexpectedly, rdev leaves a
-small recovery record in `~/.config/rdev/recovery.d`. `rdev resume` checks that
-the exact remote tmux session still exists and attaches it. A normal `rdev`
-launch always shows the node and tmux session menus.
-
-正常退出、右键选择断开、tmux 会话结束或按 Ctrl-C 时会清理恢复记录，不会误触发
-重连。关闭终端、电脑休眠、网络中断或 rdev 意外结束时会保留记录；需要恢复时
-运行 `rdev resume`。普通 `rdev` 启动始终显示节点和 tmux 会话菜单。
-
-If the remote machine itself rebooted, its in-memory tmux server may be gone.
-rdev removes the stale recovery record and returns to the menu instead of
-creating an empty session with the old name.
-
-## Upgrade and uninstall / 升级与卸载
-
-Upgrade by running the install command again.
-
-```sh
-curl -fsSL https://raw.githubusercontent.com/leafiy/rdev/main/install.sh | bash
+```text
+id|label|host|user|ssh_port|identity_file|proxy_jump
 ```
 
-Remove the program but keep node configuration:
+示例：
 
-```sh
-curl -fsSL https://raw.githubusercontent.com/leafiy/rdev/main/uninstall.sh | bash
+```text
+work|Work server|10.0.0.8|developer|22||
+devbox|Devbox|devbox.example.com|root|2224|~/.ssh/id_ed25519|bastion
 ```
 
-To remove configuration too, download the repository and run:
+通常应使用 `rdev add` 管理节点，而不是直接编辑此文件。
 
-```sh
-./uninstall.sh --purge
+## 远端自动安装
+
+首次连接时，如果远端没有 `dtach`，rdev 支持使用以下包管理器安装：
+
+- Debian / Ubuntu：`apt-get`；
+- Fedora / RHEL：`dnf`；
+- Arch Linux：`pacman`；
+- openSUSE：`zypper`；
+- Alpine Linux：`apk`；
+- macOS / Linuxbrew：`brew`。
+
+自动安装需要远端 root 权限或可用的 `sudo`。
+
+## 滚动历史说明
+
+`dtach` 会保存远端进程和 shell 命令历史，但不会维护独立的服务器端屏幕回滚缓冲区。
+
+- 当前终端窗口已经接收的内容仍保留在该终端的 scrollback 中；
+- 重新连接时可以恢复正在运行的程序和当前画面；
+- 新终端无法重建断线前所有已经输出的屏幕内容。
+
+这是使用任意本机终端、同时不引入 tmux/WezTerm 终端协议的取舍。
+
+## 从旧版本升级
+
+重新执行：
+
+```bash
+./install.sh
 ```
 
-## Development
+rdev 0.2 的旧节点格式会自动迁移，并保留备份：
 
-```sh
+```text
+nodes.conf.pre-dtach.TIMESTAMP
+```
+
+旧的 Mosh、tmux 或 WezTerm 进程不会被停止或删除；rdev 0.4 只是不再使用它们。
+
+## 安全
+
+- SSH 负责认证、主机密钥检查、私钥和跳板机；
+- rdev 不修改 `~/.ssh/config`；
+- 节点、工作区和状态文件权限为 `0600`；
+- 远端 dtach 会话目录权限为 `0700`；
+- SSH 参数以数组传递，节点字段会经过格式校验；
+- 可关闭远端自动安装。
+
+## 开发与测试
+
+```bash
 ./tests/test_syntax.sh
 ./tests/test_cli.sh
 ./tests/test_active_connection.sh
 ./tests/test_session_listing.sh
-./tests/test_mouse_input.sh
-./install.sh
+./tests/test_auto_install.sh
 ```
 
-CI runs the syntax and CLI tests on both Ubuntu and macOS.
+测试覆盖：
+
+- Bash 语法；
+- CLI 与旧配置迁移；
+- 当前终端连接；
+- 意外断线重连与正常退出；
+- 工作区菜单；
+- 远端 dtach 自动安装。
+
+CI 在 Ubuntu 和 macOS 上运行。
+
+## 卸载
+
+保留配置：
+
+```bash
+./uninstall.sh
+```
+
+同时删除 `~/.config/rdev`：
+
+```bash
+./uninstall.sh --purge
+```
 
 ## License
 

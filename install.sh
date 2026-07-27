@@ -5,7 +5,6 @@ set -e
 REPO="${RDEV_REPO:-leafiy/rdev}"
 REF="${RDEV_REF:-main}"
 BIN_DIR="${RDEV_BIN_DIR:-$HOME/.local/bin}"
-DATA_DIR="${RDEV_DATA_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/rdev}"
 SOURCE_DIR=""
 TEMP_DIR=""
 
@@ -26,7 +25,6 @@ Usage:
 
 Environment:
   RDEV_BIN_DIR   Executable directory (default: ~/.local/bin)
-  RDEV_DATA_DIR  Runtime directory (default: ~/.local/share/rdev)
   RDEV_REF       Git branch or tag (default: main)
 EOF
 }
@@ -36,8 +34,7 @@ case "${1:-}" in
 esac
 
 if [ -n "${BASH_SOURCE[0]:-}" ] &&
-   [ -f "$(dirname -- "${BASH_SOURCE[0]}")/bin/rdev" ] &&
-   [ -f "$(dirname -- "${BASH_SOURCE[0]}")/lib/tmux.conf" ]; then
+   [ -f "$(dirname -- "${BASH_SOURCE[0]}")/bin/rdev" ]; then
   SOURCE_DIR="$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 else
   command -v curl >/dev/null 2>&1 || { printf 'curl is required.\n' >&2; exit 1; }
@@ -53,17 +50,12 @@ fi
 
 [ -f "$SOURCE_DIR/bin/rdev" ] || { printf 'Invalid rdev source package.\n' >&2; exit 1; }
 
-mkdir -p "$BIN_DIR" "$DATA_DIR"
+mkdir -p "$BIN_DIR"
 install -m 755 "$SOURCE_DIR/bin/rdev" "$BIN_DIR/rdev"
-for file in rdev-agent-name rdev-agent-name.py rdev-token-status rdev-token-status.py tmux.conf; do
-  mode=644
-  case "$file" in rdev-agent-name|rdev-token-status) mode=755 ;; esac
-  install -m "$mode" "$SOURCE_DIR/lib/$file" "$DATA_DIR/$file"
-done
 
-RDEV_RUNTIME_DIR="$DATA_DIR" "$BIN_DIR/rdev" version
+"$BIN_DIR/rdev" version
 
-printf '\nInstalled:\n  %s\n  %s\n' "$BIN_DIR/rdev" "$DATA_DIR"
+printf '\nInstalled:\n  %s\n' "$BIN_DIR/rdev"
 case ":$PATH:" in
   *":$BIN_DIR:"*) ;;
   *)
