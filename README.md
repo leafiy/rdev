@@ -12,23 +12,25 @@
 
 ## 安装
 
-在你自己的电脑上运行，按提示输入服务器地址（`user@host`、`user@host:2222` 或 `~/.ssh/config` 里的别名）：
+在你自己的电脑上运行，按提示输入服务器地址（`user@host`、`user@host:2222` 或 `~/.ssh/config` 里的别名）。已经在服务器里？地址留空就是配置当前这台机器：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/leafiy/rdev/main/install.sh | bash
+curl -fsSL https://leafiy.github.io/rdev/install.sh | bash
 ```
 
 直接指定目标：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/leafiy/rdev/main/install.sh | bash -s -- dev@box:2222 -i ~/.ssh/id_ed25519
+curl -fsSL https://leafiy.github.io/rdev/install.sh | bash -s -- dev@box:2222 -i ~/.ssh/id_ed25519
 ```
 
-已经在服务器里了：
+已经在服务器里，且不想交互：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/leafiy/rdev/main/install.sh | bash -s -- --here
+curl -fsSL https://leafiy.github.io/rdev/install.sh | bash -s -- --here
 ```
+
+安装脚本由 GitHub Pages 提供；不方便访问 Pages 时也可以用 `https://raw.githubusercontent.com/leafiy/rdev/main/install.sh`，内容相同。
 
 脚本做的事：
 
@@ -154,7 +156,7 @@ rdev uninstall --purge   # 连配置一起删
 或在本机：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/leafiy/rdev/main/install.sh | bash -s -- --uninstall dev@box
+curl -fsSL https://leafiy.github.io/rdev/install.sh | bash -s -- --uninstall dev@box
 ```
 
 正在运行的会话和守护进程不受影响，需要的话用 `shpool kill` 结束。

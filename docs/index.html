@@ -77,8 +77,8 @@
 
   /* 首屏 */
   .hero { border-top: 0; padding: 48px 0 88px; }
-  .hero .wrap { display: grid; grid-template-columns: minmax(0, 1.05fr) minmax(0, 0.95fr); gap: 56px; align-items: center; }
-  @media (max-width: 900px) { .hero .wrap { grid-template-columns: 1fr; gap: 40px; } }
+  .hero .wrap { display: grid; grid-template-columns: minmax(0, 1.15fr) minmax(0, 0.85fr); gap: 56px; align-items: center; }
+  @media (max-width: 1080px) { .hero .wrap { grid-template-columns: 1fr; gap: 40px; } }
   .hero h1 { font-size: clamp(1.85rem, 3.9vw, 3rem); font-weight: 700; }
   .hero h1 em { font-style: normal; color: var(--accent); }
   .lede { margin-top: 22px; font-size: 1.12rem; color: var(--muted); max-width: 34em; }
@@ -87,9 +87,9 @@
     display: flex; align-items: stretch;
     background: var(--code-bg); color: var(--code-text);
     border-radius: var(--radius); overflow: hidden;
-    font-family: var(--mono); font-size: 0.86rem;
+    font-family: var(--mono); font-size: 0.82rem;
   }
-  .cmd code { flex: 1; min-width: 0; padding: 14px 16px; white-space: nowrap; overflow-x: auto; }
+  .cmd code { flex: 1; min-width: 0; padding: 14px 16px; overflow-wrap: anywhere; }
   .cmd code::before { content: "$ "; color: var(--faint); }
   .cmd button {
     border: 0; border-left: 1px solid #2a2a2e; background: transparent; color: var(--code-text);
@@ -175,19 +175,21 @@
   @media (max-width: 767px) { .shots .grid { grid-template-columns: 1fr; } .shots .grid .slot:first-child { aspect-ratio: 16 / 10; } }
 
   /* 安装 */
-  .install .wrap { display: grid; grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr); gap: 64px; }
-  .install .wrap > * { min-width: 0; }
-  @media (max-width: 900px) { .install .wrap { grid-template-columns: 1fr; gap: 40px; } }
-  .install .cmd { margin-top: 24px; }
+  .install-head { max-width: 40em; }
+  .install .cmd { margin-top: 24px; max-width: 640px; }
+  .install .tip { margin-top: 14px; font-size: 0.92rem; }
+  .install .cols { margin-top: 56px; display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 40px 64px; }
+  .install .cols > * { min-width: 0; }
+  .install .cols h3:first-child { margin-top: 0; }
+  @media (max-width: 900px) { .install .cols { grid-template-columns: 1fr; gap: 32px; } }
   .install h3 { margin-top: 36px; font-size: 1rem; font-weight: 600; }
   .install p { margin-top: 8px; color: var(--muted); font-size: 0.97rem; }
   .install ol, .install ul { margin: 12px 0 0; padding-left: 1.2em; color: var(--muted); font-size: 0.97rem; }
   .install li { margin-top: 8px; }
   .install li strong { color: var(--text); font-weight: 600; }
-  .install pre { max-width: 100%; }
   .install pre {
     margin: 10px 0 0; padding: 12px 14px; background: var(--code-bg); color: var(--code-text);
-    border-radius: var(--radius); font-size: 0.82rem; overflow-x: auto; line-height: 1.6;
+    border-radius: var(--radius); font-size: 0.82rem; line-height: 1.6; white-space: pre-wrap; overflow-wrap: anywhere;
   }
   .install pre .c { color: var(--faint); }
   kbd {
@@ -238,7 +240,7 @@
       <h1>agent 远程开发时代，<br>何必为了 agent <em>换掉你熟悉的终端工具</em></h1>
       <p class="lede">一行命令配置好服务器。之后照常 ssh，会话自动恢复，agent 不因断线而停。本机不装任何东西。</p>
       <div class="cmd">
-        <code id="install-cmd">curl -fsSL https://raw.githubusercontent.com/leafiy/rdev/main/install.sh | bash</code>
+        <code id="install-cmd">curl -fsSL https://leafiy.github.io/rdev/install.sh | bash</code>
         <button type="button" data-copy="#install-cmd">复制</button>
       </div>
       <div class="hero-actions">
@@ -369,22 +371,36 @@
 
 <section class="install" id="install">
   <div class="wrap">
-    <div>
+    <div class="install-head">
       <h2>安装</h2>
-      <p>在你自己的电脑上运行，按提示输入服务器地址（<span class="mono">user@host</span>、<span class="mono">user@host:2222</span> 或 ssh 别名）。</p>
+      <p>在你自己的电脑上运行，按提示输入服务器地址（<span class="mono">user@host</span>、<span class="mono">user@host:2222</span> 或 ssh 别名）。已经在服务器里？地址留空，就是配置当前这台机器。</p>
       <div class="cmd">
-        <code id="install-cmd-2">curl -fsSL https://raw.githubusercontent.com/leafiy/rdev/main/install.sh | bash</code>
+        <code id="install-cmd-2">curl -fsSL https://leafiy.github.io/rdev/install.sh | bash</code>
         <button type="button" data-copy="#install-cmd-2">复制</button>
       </div>
+      <p class="tip">不想交互：把地址跟在后面，<span class="mono">| bash -s -- dev@box:2222</span>。密钥 <span class="mono">-i</span>、跳板 <span class="mono">-J</span> 和 ssh 一样写。</p>
+    </div>
 
-      <h3>已经在服务器里了？</h3>
-      <pre>curl -fsSL https://raw.githubusercontent.com/leafiy/rdev/main/install.sh | bash -s -- --here</pre>
+    <div class="cols">
+      <div>
+        <h3>脚本做了什么</h3>
+        <ol>
+          <li><strong>用 ssh 连到服务器</strong>，全程复用一条连接，只输一次密码。</li>
+          <li><strong>在本机下载 shpool 的静态二进制并推过去</strong>，服务器访问不了 GitHub 也没关系。不需要 root，不装包管理器里的任何东西。</li>
+          <li><strong>写一份 shpool 配置</strong>：不改提示符、重连只交还不回放。</li>
+          <li><strong>在 ~/.zshrc 或 ~/.bashrc 末尾加一段带标记的钩子</strong>，只在交互式 SSH 登录时弹菜单；<span class="mono">ssh host 命令</span>、scp、rsync、VS Code Remote 一律不受影响。</li>
+        </ol>
 
-      <h3>直接指定目标，不交互</h3>
-      <pre>curl -fsSL https://raw.githubusercontent.com/leafiy/rdev/main/install.sh | bash -s -- dev@box:2222 -i ~/.ssh/id_ed25519</pre>
+        <h3>需要什么</h3>
+        <ul>
+          <li>本机：ssh、curl。macOS、Linux、WSL 都行。</li>
+          <li>服务器：Linux x86_64 / arm64（或 Apple Silicon 的 macOS），登录 shell 为 zsh 或 bash。</li>
+        </ul>
+      </div>
 
-      <h3>之后每天的用法</h3>
-      <pre><span class="c"># 照常登录，看到菜单，回车恢复上次会话</span>
+      <div>
+        <h3>之后每天的用法</h3>
+        <pre><span class="c"># 照常登录，看到菜单，回车恢复上次会话</span>
 ssh dev@box
 
 <span class="c"># 跳过菜单直达某个会话</span>
@@ -395,32 +411,16 @@ rdev            <span class="c"># 菜单</span>
 rdev list       <span class="c"># 列出会话与其中运行的 agent</span>
 rdev kill work  <span class="c"># 结束一个会话</span>
 rdev doctor     <span class="c"># 检查安装状态</span></pre>
-      <p>会话里按 <kbd>Ctrl-Space</kbd> <kbd>Ctrl-q</kbd> 离开但不结束；直接关窗口或断网效果一样。菜单里按 <kbd>q</kbd> 进入普通 shell。</p>
-    </div>
+        <p>会话里按 <kbd>Ctrl-Space</kbd> <kbd>Ctrl-q</kbd> 离开但不结束；直接关窗口或断网效果一样。菜单里按 <kbd>q</kbd> 进入普通 shell。</p>
 
-    <div>
-      <h3 style="margin-top:0">脚本做了什么</h3>
-      <ol>
-        <li><strong>用 ssh 连到服务器</strong>，全程复用一条连接，只输一次密码。</li>
-        <li><strong>在本机下载 shpool 的静态二进制并推过去</strong>，服务器访问不了 GitHub 也没关系。不需要 root，不装包管理器里的任何东西。</li>
-        <li><strong>写一份 shpool 配置</strong>：不改提示符、重连只交还不回放。</li>
-        <li><strong>在 ~/.zshrc 或 ~/.bashrc 末尾加一段带标记的钩子</strong>，只在交互式 SSH 登录时弹菜单；<span class="mono">ssh host 命令</span>、scp、rsync、VS Code Remote 一律不受影响。</li>
-      </ol>
-
-      <h3>需要什么</h3>
-      <ul>
-        <li>本机：ssh、curl。macOS、Linux、WSL 都行。</li>
-        <li>服务器：Linux x86_64 / arm64（或 Apple Silicon 的 macOS），登录 shell 为 zsh 或 bash。</li>
-      </ul>
-
-      <h3>卸载</h3>
-      <pre>rdev uninstall            <span class="c"># 在服务器上</span>
-<span class="c"># 或在本机：</span>
-curl -fsSL https://raw.githubusercontent.com/leafiy/rdev/main/install.sh | bash -s -- --uninstall dev@box</pre>
-      <p>只删钩子、程序和下载的二进制。正在运行的会话不受影响。</p>
+        <h3>卸载</h3>
+        <pre>rdev uninstall</pre>
+        <p>在服务器上运行。只删钩子、程序和下载的二进制，正在运行的会话不受影响。</p>
+      </div>
     </div>
   </div>
 </section>
+
 
 <section class="faq" id="faq">
   <div class="wrap">

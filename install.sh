@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 # rdev 一键安装：在你自己的电脑上运行，把远程服务器配置好。本机不安装任何东西。
 #
-#   curl -fsSL https://raw.githubusercontent.com/leafiy/rdev/main/install.sh | bash
-#   curl -fsSL https://raw.githubusercontent.com/leafiy/rdev/main/install.sh | bash -s -- user@host
-#   curl -fsSL https://raw.githubusercontent.com/leafiy/rdev/main/install.sh | bash -s -- user@host:2222 -i ~/.ssh/id_ed25519
-#   curl -fsSL https://raw.githubusercontent.com/leafiy/rdev/main/install.sh | bash -s -- --here        # 已经在服务器里
-#   curl -fsSL https://raw.githubusercontent.com/leafiy/rdev/main/install.sh | bash -s -- --uninstall user@host
+#   curl -fsSL https://leafiy.github.io/rdev/install.sh | bash
+#   （地址留空 = 配置当前这台机器）
+#   curl -fsSL https://leafiy.github.io/rdev/install.sh | bash -s -- user@host
+#   curl -fsSL https://leafiy.github.io/rdev/install.sh | bash -s -- user@host:2222 -i ~/.ssh/id_ed25519
+#   curl -fsSL https://leafiy.github.io/rdev/install.sh | bash -s -- --here        # 已经在服务器里
+#   curl -fsSL https://leafiy.github.io/rdev/install.sh | bash -s -- --uninstall user@host
 #
 # 兼容 macOS 自带的 bash 3.2。
 set -e
@@ -99,12 +100,14 @@ parse_args() {
   done
 }
 
-ask_target() {
+ask_target() {  # $1 = here：允许留空，表示配置当前这台机器
   has_tty || die '没有终端可以交互。请把目标写在命令里：... | bash -s -- user@host'
   printf '\n  %srdev%s · 让远程 shell 和里面的 agent 在 SSH 断线后继续运行\n\n' "$C_BOLD" "$C_RESET" >/dev/tty
-  printf '  输入远程 SSH 地址（例：root@1.2.3.4、dev@box:2222，或 ~/.ssh/config 里的别名）\n  > ' >/dev/tty
+  printf '  输入远程 SSH 地址（例：root@1.2.3.4、dev@box:2222，或 ~/.ssh/config 里的别名）\n' >/dev/tty
+  [ "${1:-}" = here ] && printf '  已经在服务器里？直接回车，配置当前这台机器\n' >/dev/tty
+  printf '  > ' >/dev/tty
   IFS= read -r TARGET </dev/tty
-  [ -n "$TARGET" ] || die '没有输入目标。'
+  [ -n "$TARGET" ] || [ "${1:-}" = here ] || die '没有输入目标。'
 }
 
 # 把 [用户@]主机[:端口] / ssh://用户@主机:端口 拆成 HOST 和 PORT
@@ -217,7 +220,14 @@ mode_uninstall() {
 mode_install() {
   local info os arch remote_home archive asset setup_cmd rc answer
 
-  [ -n "$TARGET" ] || ask_target
+  if [ -z "$TARGET" ]; then
+    ask_target here
+    if [ -z "$TARGET" ]; then
+      say '没有输入地址，配置当前这台机器。'
+      mode_here
+      return
+    fi
+  fi
   parse_target
   build_ssh_opts
   locate_payload
