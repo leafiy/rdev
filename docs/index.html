@@ -1,0 +1,503 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>rdev · agent 远程开发时代，何必为了 agent 换掉你熟悉的终端工具</title>
+<meta name="description" content="一行命令配置好服务器。之后照常 ssh，会话自动恢复，agent 不因断线而停。本机不装任何东西。">
+<meta property="og:title" content="rdev · 何必为了 agent 换掉你熟悉的终端工具">
+<meta property="og:description" content="一行命令配置好服务器。之后照常 ssh，会话自动恢复，agent 不因断线而停。本机不装任何东西。">
+<meta property="og:type" content="website">
+<meta name="color-scheme" content="light dark">
+<style>
+  :root {
+    --bg: #f7f7f5;
+    --surface: #ffffff;
+    --text: #18181b;
+    --muted: #5b5b63;
+    --faint: #8b8b93;
+    --line: #e2e2e0;
+    --accent: #15803d;
+    --accent-ink: #ffffff;
+    --accent-soft: #e6f4ea;
+    --code-bg: #141417;
+    --code-text: #e8e8e6;
+    --slot: #ececea;
+    --radius: 10px;
+    --sans: ui-sans-serif, -apple-system, "SF Pro Text", "PingFang SC", "Hiragino Sans GB", "Noto Sans CJK SC", "Microsoft YaHei", system-ui, sans-serif;
+    --mono: ui-monospace, "SF Mono", Menlo, "JetBrains Mono", Consolas, "Liberation Mono", monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0e0e10;
+      --surface: #151518;
+      --text: #f2f2f0;
+      --muted: #a4a4ab;
+      --faint: #6f6f78;
+      --line: #27272b;
+      --accent: #4ade80;
+      --accent-ink: #052e16;
+      --accent-soft: #14251a;
+      --code-bg: #0a0a0c;
+      --code-text: #e8e8e6;
+      --slot: #1b1b1f;
+    }
+  }
+
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  @media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--sans);
+    font-size: 17px;
+    line-height: 1.7;
+    -webkit-font-smoothing: antialiased;
+  }
+  a { color: inherit; text-decoration: none; }
+  code, pre, .mono { font-family: var(--mono); }
+  .wrap { max-width: 1120px; margin: 0 auto; padding: 0 24px; }
+  h1, h2, h3 { margin: 0; letter-spacing: -0.01em; line-height: 1.25; }
+  h2 { font-size: clamp(1.5rem, 2.6vw, 2.1rem); }
+  p { margin: 0; }
+  .muted { color: var(--muted); }
+  section { padding: 96px 0; border-top: 1px solid var(--line); }
+  @media (max-width: 767px) { section { padding: 64px 0; } }
+
+  /* 导航 */
+  .nav { height: 64px; display: flex; align-items: center; }
+  .nav .wrap { display: flex; align-items: center; justify-content: space-between; width: 100%; }
+  .brand { font-family: var(--mono); font-weight: 600; font-size: 1.05rem; }
+  .brand span { color: var(--accent); }
+  .links { display: flex; gap: 28px; font-size: 0.95rem; color: var(--muted); }
+  .links a:hover { color: var(--text); }
+  @media (max-width: 640px) { .links a:not(.gh) { display: none; } }
+
+  /* 首屏 */
+  .hero { border-top: 0; padding: 48px 0 88px; }
+  .hero .wrap { display: grid; grid-template-columns: minmax(0, 1.05fr) minmax(0, 0.95fr); gap: 56px; align-items: center; }
+  @media (max-width: 900px) { .hero .wrap { grid-template-columns: 1fr; gap: 40px; } }
+  .hero h1 { font-size: clamp(1.85rem, 3.9vw, 3rem); font-weight: 700; }
+  .hero h1 em { font-style: normal; color: var(--accent); }
+  .lede { margin-top: 22px; font-size: 1.12rem; color: var(--muted); max-width: 34em; }
+  .cmd {
+    margin-top: 32px;
+    display: flex; align-items: stretch;
+    background: var(--code-bg); color: var(--code-text);
+    border-radius: var(--radius); overflow: hidden;
+    font-family: var(--mono); font-size: 0.86rem;
+  }
+  .cmd code { flex: 1; padding: 14px 16px; white-space: nowrap; overflow-x: auto; }
+  .cmd code::before { content: "$ "; color: var(--faint); }
+  .cmd button {
+    border: 0; border-left: 1px solid #2a2a2e; background: transparent; color: var(--code-text);
+    padding: 0 18px; font: inherit; cursor: pointer; white-space: nowrap;
+  }
+  .cmd button:hover { background: #1f1f24; }
+  .cmd button:active { transform: translateY(1px); }
+  .cmd button.done { color: #4ade80; }
+  .hero-actions { margin-top: 14px; display: flex; gap: 18px; align-items: center; font-size: 0.95rem; color: var(--muted); }
+  .hero-actions a { text-decoration: underline; text-underline-offset: 4px; }
+  .hero-actions a:hover { color: var(--text); }
+  @media (prefers-reduced-motion: no-preference) {
+    .hero .wrap > * { animation: rise 0.6s cubic-bezier(0.16, 1, 0.3, 1) both; }
+    .hero .wrap > :nth-child(2) { animation-delay: 0.12s; }
+    @keyframes rise { from { opacity: 0; transform: translateY(14px); } to { opacity: 1; transform: none; } }
+  }
+
+  /* 素材位：视频 / 截图。替换方法见每个位置上方的注释 */
+  .slot {
+    margin: 0;
+    position: relative;
+    background: var(--slot);
+    border: 1px dashed var(--faint);
+    border-radius: var(--radius);
+    display: grid; place-items: center; text-align: center;
+    color: var(--muted); font-size: 0.9rem; padding: 24px;
+  }
+  .slot small { display: block; margin-top: 6px; color: var(--faint); font-family: var(--mono); font-size: 0.75rem; line-height: 1.5; }
+  .slot-tag {
+    position: absolute; top: 12px; left: 12px;
+    font-family: var(--mono); font-size: 0.7rem; letter-spacing: 0.04em;
+    color: var(--accent); background: var(--accent-soft); border-radius: 6px; padding: 2px 8px;
+  }
+  .slot video, .slot img { display: block; width: 100%; height: 100%; object-fit: cover; border-radius: var(--radius); }
+  .slot-video { aspect-ratio: 16 / 10; }
+
+  /* 问题 */
+  .why .wrap { max-width: 900px; }
+  .why h2 { max-width: 20em; }
+  .why .prose { margin-top: 28px; display: grid; gap: 18px; color: var(--muted); max-width: 42em; }
+  .why .prose strong { color: var(--text); font-weight: 600; }
+  .compare { margin-top: 56px; display: grid; grid-template-columns: 1.1fr 1.4fr 1.4fr; font-size: 0.97rem; }
+  .compare > div { padding: 16px 12px 16px 0; border-top: 1px solid var(--line); }
+  .compare .head { border-top: 0; padding-top: 0; font-family: var(--mono); font-size: 0.8rem; color: var(--faint); }
+  .compare .head.ok { color: var(--accent); }
+  .compare .label { color: var(--muted); }
+  .compare .ok-cell { color: var(--text); font-weight: 500; }
+  @media (max-width: 640px) {
+    .compare { grid-template-columns: 1fr; }
+    .compare .head { display: none; }
+    .compare .label { padding-bottom: 2px; font-family: var(--mono); font-size: 0.8rem; }
+    .compare .other { border-top: 0; padding-top: 0; padding-bottom: 2px; }
+    .compare .other::before { content: "换工具  "; color: var(--faint); font-family: var(--mono); font-size: 0.8rem; }
+    .compare .ok-cell { border-top: 0; padding-top: 0; }
+    .compare .ok-cell::before { content: "rdev  "; color: var(--accent); font-family: var(--mono); font-size: 0.8rem; }
+  }
+
+  /* 原理 */
+  .flow { margin-top: 44px; display: grid; grid-template-columns: repeat(4, 1fr); gap: 0; }
+  .node { position: relative; padding: 22px 28px 22px 0; }
+  .node + .node { padding-left: 28px; }
+  .node + .node::before { content: "→"; position: absolute; left: -10px; top: 22px; color: var(--faint); font-family: var(--mono); }
+  .node .k { font-family: var(--mono); font-size: 0.8rem; color: var(--accent); }
+  .node .t { margin-top: 6px; font-weight: 600; font-size: 1.05rem; }
+  .node .d { margin-top: 6px; font-size: 0.93rem; color: var(--muted); }
+  @media (max-width: 900px) {
+    .flow { grid-template-columns: 1fr; }
+    .node, .node + .node { padding: 18px 0; border-top: 1px solid var(--line); }
+    .node + .node::before { display: none; }
+  }
+  .notes { margin-top: 56px; display: grid; grid-template-columns: 1fr 1fr; gap: 40px 56px; }
+  .notes h3 { font-size: 1.05rem; font-weight: 600; }
+  .notes p { margin-top: 8px; color: var(--muted); font-size: 0.97rem; }
+  .notes .wide { grid-column: 1 / -1; max-width: 42em; }
+  @media (max-width: 767px) { .notes { grid-template-columns: 1fr; gap: 28px; } }
+
+  /* 截图 */
+  .shots .grid { margin-top: 40px; display: grid; grid-template-columns: 3fr 2fr; gap: 20px; }
+  .shots .grid .slot:first-child { grid-column: 1 / -1; aspect-ratio: 21 / 9; }
+  .shots .grid .slot { aspect-ratio: 16 / 10; }
+  .shots figcaption { margin-top: 10px; font-size: 0.9rem; color: var(--muted); }
+  .shots figure { margin: 0; }
+  @media (max-width: 767px) { .shots .grid { grid-template-columns: 1fr; } .shots .grid .slot:first-child { aspect-ratio: 16 / 10; } }
+
+  /* 安装 */
+  .install .wrap { display: grid; grid-template-columns: 1.2fr 1fr; gap: 64px; }
+  @media (max-width: 900px) { .install .wrap { grid-template-columns: 1fr; gap: 40px; } }
+  .install .cmd { margin-top: 24px; }
+  .install h3 { margin-top: 36px; font-size: 1rem; font-weight: 600; }
+  .install p { margin-top: 8px; color: var(--muted); font-size: 0.97rem; }
+  .install ol, .install ul { margin: 12px 0 0; padding-left: 1.2em; color: var(--muted); font-size: 0.97rem; }
+  .install li { margin-top: 8px; }
+  .install li strong { color: var(--text); font-weight: 600; }
+  .install pre {
+    margin: 10px 0 0; padding: 12px 14px; background: var(--code-bg); color: var(--code-text);
+    border-radius: var(--radius); font-size: 0.82rem; overflow-x: auto; line-height: 1.6;
+  }
+  .install pre .c { color: var(--faint); }
+  kbd {
+    font-family: var(--mono); font-size: 0.82em; padding: 1px 6px;
+    border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 6px; background: var(--surface);
+  }
+
+  /* 常见问题 */
+  .faq .wrap { max-width: 820px; }
+  .faq details { border-top: 1px solid var(--line); padding: 4px 0; }
+  .faq details:last-of-type { border-bottom: 1px solid var(--line); }
+  .faq summary {
+    cursor: pointer; list-style: none; padding: 16px 0; font-weight: 600; font-size: 1.02rem;
+    display: flex; justify-content: space-between; align-items: center; gap: 16px;
+  }
+  .faq summary::-webkit-details-marker { display: none; }
+  .faq summary::after { content: "+"; color: var(--faint); font-family: var(--mono); font-size: 1.1rem; }
+  .faq details[open] summary::after { content: "−"; }
+  .faq details p { padding: 0 0 18px; color: var(--muted); font-size: 0.97rem; max-width: 42em; }
+  .faq details p + p { margin-top: -6px; }
+  .faq code { font-size: 0.86em; background: var(--accent-soft); color: var(--text); padding: 1px 6px; border-radius: 6px; }
+  .faq-list { margin-top: 36px; }
+
+  footer { border-top: 1px solid var(--line); padding: 40px 0; font-size: 0.9rem; color: var(--muted); }
+  footer .wrap { display: flex; flex-wrap: wrap; gap: 8px 28px; justify-content: space-between; }
+  footer a:hover { color: var(--text); }
+</style>
+</head>
+<body>
+
+<header class="nav">
+  <div class="wrap">
+    <a class="brand" href="#">rdev<span>_</span></a>
+    <nav class="links">
+      <a href="#how">原理</a>
+      <a href="#install">安装</a>
+      <a href="#faq">常见问题</a>
+      <a class="gh" href="https://github.com/leafiy/rdev">GitHub</a>
+    </nav>
+  </div>
+</header>
+
+<main>
+
+<section class="hero">
+  <div class="wrap">
+    <div>
+      <h1>agent 远程开发时代，<br>何必为了 agent <em>换掉你熟悉的终端工具</em></h1>
+      <p class="lede">一行命令配置好服务器。之后照常 ssh，会话自动恢复，agent 不因断线而停。本机不装任何东西。</p>
+      <div class="cmd">
+        <code id="install-cmd">curl -fsSL https://raw.githubusercontent.com/leafiy/rdev/main/install.sh | bash</code>
+        <button type="button" data-copy="#install-cmd">复制</button>
+      </div>
+      <div class="hero-actions">
+        <span>在你的电脑上运行，输入服务器地址，完成。</span>
+        <a href="https://github.com/leafiy/rdev">源码</a>
+      </div>
+    </div>
+
+    <!-- ▼ 视频位：把 demo 放到 docs/assets/demo.mp4，然后把这个 <figure> 里的内容换成：
+         <video src="assets/demo.mp4" poster="assets/demo-poster.jpg" autoplay muted loop playsinline></video> -->
+    <figure class="slot slot-video" aria-label="演示视频位">
+      <span class="slot-tag">视频</span>
+      <p>demo 视频位
+        <small>docs/assets/demo.mp4<br>16:10，30 秒内：断线 → 重新 ssh → 回车 → agent 还在</small>
+      </p>
+    </figure>
+  </div>
+</section>
+
+<section class="why" id="why">
+  <div class="wrap">
+    <h2>问题只有一个：SSH 一断，agent 就停了</h2>
+    <div class="prose">
+      <p>Claude Code、Codex、OpenCode 这些 agent 跑在远程机器的 shell 里。笔记本合盖、换个 Wi-Fi、地铁进隧道，SSH 断开，shell 被回收，跑到一半的任务也没了。</p>
+      <p>常见的解法是换工具：tmux 接管你的终端，鼠标、滚动、复制全变了手感；专门的远程 IDE 或 AI 终端，又要你放弃用了多年的 iTerm2、Ghostty、Warp 和一整套 shell 配置。</p>
+      <p><strong>rdev 的做法是只在服务器上加一层会话保持。</strong>终端还是你的终端，agent 还是你的 agent，ssh 还是那条 ssh。</p>
+    </div>
+
+    <div class="compare" role="table" aria-label="换工具与 rdev 的对比">
+      <div class="head"></div>
+      <div class="head">换工具</div>
+      <div class="head ok">rdev</div>
+
+      <div class="label">本机要装什么</div>
+      <div class="other">新终端、新客户端，或者一套 tmux 肌肉记忆</div>
+      <div class="ok-cell">什么都不装</div>
+
+      <div class="label">鼠标、滚动、复制</div>
+      <div class="other">由多路复用器接管，手感变了</div>
+      <div class="ok-cell">还是你终端原生的</div>
+
+      <div class="label">断线之后</div>
+      <div class="other">记快捷键找回窗口，或者从头再来</div>
+      <div class="ok-cell">重新 ssh，按回车</div>
+
+      <div class="label">换 agent</div>
+      <div class="other">常常绑定某一家</div>
+      <div class="ok-cell">任何能在 shell 里跑的都行</div>
+    </div>
+  </div>
+</section>
+
+<section class="how" id="how">
+  <div class="wrap">
+    <h2>它是怎么工作的</h2>
+
+    <div class="flow">
+      <div class="node">
+        <div class="k">本机</div>
+        <div class="t">你的终端</div>
+        <div class="d">iTerm2、Ghostty、Kitty、WezTerm、Warp、Windows Terminal，随便哪个。</div>
+      </div>
+      <div class="node">
+        <div class="k">传输</div>
+        <div class="t">ssh</div>
+        <div class="d">照常敲 <span class="mono">ssh 主机</span>，不加参数，不改 ~/.ssh/config。</div>
+      </div>
+      <div class="node">
+        <div class="k">服务器</div>
+        <div class="t">rdev 菜单</div>
+        <div class="d">登录后列出会话：回车恢复上次的，n 新建，选一个已连接的就接管过来。</div>
+      </div>
+      <div class="node">
+        <div class="k">服务器</div>
+        <div class="t">shpool 会话</div>
+        <div class="d">shell 和里面的 agent 由守护进程持有，SSH 怎么断它都在。</div>
+      </div>
+    </div>
+
+    <div class="notes">
+      <div class="wide">
+        <h3>底层是 shpool，Google 开源的会话保持工具</h3>
+        <p>它只做一件事：把 shell 从 SSH 连接里解耦出来。它不是终端复用器，不画窗格、不接管键盘和鼠标，所以你的终端还是原来的终端。rdev 负责把它配好，并在登录时给你一个菜单。</p>
+      </div>
+      <div>
+        <h3>重连时不回放，只交还</h3>
+        <p>重新连上后，rdev 把终端交还给原来的程序并通知它重绘。Claude Code 这类 TUI 会自己把界面画回来，不会出现错位和重复内容。</p>
+      </div>
+      <div>
+        <h3>滚动、复制，都还是本机的事</h3>
+        <p>没有 copy-mode，没有前缀键。鼠标滚轮翻的是你终端自己的回滚缓冲，选中就是复制，链接可以直接点。</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="shots" id="shots">
+  <div class="wrap">
+    <h2>看起来是这样</h2>
+    <div class="grid">
+      <!-- ▼ 大图位：docs/assets/reconnect.gif（或 .mp4），把 <figure class="slot"> 里的内容换成 <img src="assets/reconnect.gif" alt="断线后重新 ssh，按回车回到原来的会话"> -->
+      <figure>
+        <div class="slot" aria-label="断线重连录屏位">
+          <span class="slot-tag">GIF / 视频</span>
+          <p>断线重连全过程<small>docs/assets/reconnect.gif · 宽 1600px 左右</small></p>
+        </div>
+        <figcaption>拔掉网线，重新 ssh，按回车，回到刚才那个 shell。</figcaption>
+      </figure>
+      <!-- ▼ 截图位：docs/assets/menu.png -->
+      <figure>
+        <div class="slot" aria-label="会话菜单截图位">
+          <span class="slot-tag">截图</span>
+          <p>会话菜单<small>docs/assets/menu.png</small></p>
+        </div>
+        <figcaption>ssh 登录后看到的菜单，会标出每个会话里跑着什么。</figcaption>
+      </figure>
+      <!-- ▼ 截图位：docs/assets/agent.png -->
+      <figure>
+        <div class="slot" aria-label="agent 继续运行截图位">
+          <span class="slot-tag">截图</span>
+          <p>agent 还在原地<small>docs/assets/agent.png</small></p>
+        </div>
+        <figcaption>重连之后，Claude Code 的对话和正在跑的任务都在。</figcaption>
+      </figure>
+    </div>
+  </div>
+</section>
+
+<section class="install" id="install">
+  <div class="wrap">
+    <div>
+      <h2>安装</h2>
+      <p>在你自己的电脑上运行，按提示输入服务器地址（<span class="mono">user@host</span>、<span class="mono">user@host:2222</span> 或 ssh 别名）。</p>
+      <div class="cmd">
+        <code id="install-cmd-2">curl -fsSL https://raw.githubusercontent.com/leafiy/rdev/main/install.sh | bash</code>
+        <button type="button" data-copy="#install-cmd-2">复制</button>
+      </div>
+
+      <h3>已经在服务器里了？</h3>
+      <pre>curl -fsSL https://raw.githubusercontent.com/leafiy/rdev/main/install.sh | bash -s -- --here</pre>
+
+      <h3>直接指定目标，不交互</h3>
+      <pre>curl -fsSL https://raw.githubusercontent.com/leafiy/rdev/main/install.sh | bash -s -- dev@box:2222 -i ~/.ssh/id_ed25519</pre>
+
+      <h3>之后每天的用法</h3>
+      <pre><span class="c"># 照常登录，看到菜单，回车恢复上次会话</span>
+ssh dev@box
+
+<span class="c"># 跳过菜单直达某个会话</span>
+ssh -t dev@box '~/.local/bin/rdev attach work'
+
+<span class="c"># 在服务器上</span>
+rdev            <span class="c"># 菜单</span>
+rdev list       <span class="c"># 列出会话与其中运行的 agent</span>
+rdev kill work  <span class="c"># 结束一个会话</span>
+rdev doctor     <span class="c"># 检查安装状态</span></pre>
+      <p>会话里按 <kbd>Ctrl-Space</kbd> <kbd>Ctrl-q</kbd> 离开但不结束；直接关窗口或断网效果一样。菜单里按 <kbd>q</kbd> 进入普通 shell。</p>
+    </div>
+
+    <div>
+      <h3 style="margin-top:0">脚本做了什么</h3>
+      <ol>
+        <li><strong>用 ssh 连到服务器</strong>，全程复用一条连接，只输一次密码。</li>
+        <li><strong>在本机下载 shpool 的静态二进制并推过去</strong>，服务器访问不了 GitHub 也没关系。不需要 root，不装包管理器里的任何东西。</li>
+        <li><strong>写一份 shpool 配置</strong>：不改提示符、重连只交还不回放。</li>
+        <li><strong>在 ~/.zshrc 或 ~/.bashrc 末尾加一段带标记的钩子</strong>，只在交互式 SSH 登录时弹菜单；<span class="mono">ssh host 命令</span>、scp、rsync、VS Code Remote 一律不受影响。</li>
+      </ol>
+
+      <h3>需要什么</h3>
+      <ul>
+        <li>本机：ssh、curl。macOS、Linux、WSL 都行。</li>
+        <li>服务器：Linux x86_64 / arm64（或 Apple Silicon 的 macOS），登录 shell 为 zsh 或 bash。</li>
+      </ul>
+
+      <h3>卸载</h3>
+      <pre>rdev uninstall            <span class="c"># 在服务器上</span>
+<span class="c"># 或在本机：</span>
+curl -fsSL https://raw.githubusercontent.com/leafiy/rdev/main/install.sh | bash -s -- --uninstall dev@box</pre>
+      <p>只删钩子、程序和下载的二进制。正在运行的会话不受影响。</p>
+    </div>
+  </div>
+</section>
+
+<section class="faq" id="faq">
+  <div class="wrap">
+    <h2>常见问题</h2>
+    <div class="faq-list">
+      <details>
+        <summary>会动我服务器上的什么？</summary>
+        <p>三样：<code>~/.local/bin/rdev</code> 和 <code>~/.local/share/rdev/bin/shpool</code> 两个文件，<code>~/.config/rdev/shpool.toml</code> 一份配置，以及 <code>~/.zshrc</code> / <code>~/.bashrc</code> 末尾一段用 <code># &gt;&gt;&gt; rdev &gt;&gt;&gt;</code> 标记包起来的钩子。不碰 sshd，不需要 root，不装系统包。</p>
+      </details>
+      <details>
+        <summary>支持哪些终端？</summary>
+        <p>任何能 ssh 的终端：iTerm2、Terminal.app、Ghostty、Kitty、WezTerm、Alacritty、Warp、Windows Terminal、Tabby、Termius。因为本机什么都不装，所以谈不上“支持”，它只是照常工作。</p>
+      </details>
+      <details>
+        <summary>鼠标滚动和复制还正常吗？</summary>
+        <p>正常。rdev 不是多路复用器，没有 copy-mode。滚轮翻的是你终端自己的回滚缓冲，选中即复制。</p>
+        <p>断线前已经输出到你终端里的内容仍在你的回滚里；换一个新终端窗口重连时，从当前画面继续，历史输出不回放。这是为了让 agent 的界面在重连后保持干净。</p>
+      </details>
+      <details>
+        <summary>不想每次都进菜单？</summary>
+        <p>菜单里按 <code>q</code> 进入普通 shell；直达某个会话用 <code>ssh -t 主机 '~/.local/bin/rdev attach 名称'</code>；完全跳过用 <code>ssh -t 主机 'RDEV_SKIP=1 exec $SHELL -l'</code>。非交互的 <code>ssh 主机 命令</code>、scp、rsync、git、VS Code Remote 本来就不会触发菜单。</p>
+      </details>
+      <details>
+        <summary>和 tmux、mosh 有什么区别？</summary>
+        <p>tmux 是终端复用器，会接管整个终端：窗格、前缀键、copy-mode、自己的鼠标处理。它能保持会话，但代价是你的终端不再是你的终端。</p>
+        <p>mosh 解决的是网络抖动和漫游，本身不保持会话（服务端进程结束会话就没了），还要本机装客户端、服务器开 UDP 端口。rdev 只做会话保持，本机零安装，走的还是普通 ssh。</p>
+      </details>
+      <details>
+        <summary>服务器重启了会怎样？</summary>
+        <p>会话随之消失，这一点和 tmux 一样。重启后第一次 ssh 登录时 rdev 会自动把守护进程拉起来，不需要你做任何事。</p>
+      </details>
+      <details>
+        <summary>多个终端能同时连同一个会话吗？</summary>
+        <p>一个会话同一时间只属于一个终端。在菜单里选一个“已连接”的会话，就会从原来那个终端接管过来。想并行就多开几个会话，每个会话里跑一个 agent。</p>
+      </details>
+    </div>
+  </div>
+</section>
+
+</main>
+
+<footer>
+  <div class="wrap">
+    <span>rdev · MIT 许可</span>
+    <span>
+      <a href="https://github.com/leafiy/rdev">GitHub</a>
+      &nbsp;&nbsp;·&nbsp;&nbsp;
+      <a href="https://github.com/shell-pool/shpool">基于 shpool</a>
+    </span>
+  </div>
+</footer>
+
+<script>
+  document.querySelectorAll('button[data-copy]').forEach(function (button) {
+    button.addEventListener('click', function () {
+      var text = document.querySelector(button.getAttribute('data-copy')).textContent.trim();
+      var done = function () {
+        button.textContent = '已复制';
+        button.classList.add('done');
+        setTimeout(function () { button.textContent = '复制'; button.classList.remove('done'); }, 1600);
+      };
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(text).then(done, function () { fallback(text, done); });
+      } else {
+        fallback(text, done);
+      }
+    });
+  });
+  function fallback(text, done) {
+    var area = document.createElement('textarea');
+    area.value = text;
+    area.setAttribute('readonly', '');
+    area.style.position = 'fixed';
+    area.style.opacity = '0';
+    document.body.appendChild(area);
+    area.select();
+    try { document.execCommand('copy'); done(); } catch (e) {}
+    document.body.removeChild(area);
+  }
+</script>
+</body>
+</html>

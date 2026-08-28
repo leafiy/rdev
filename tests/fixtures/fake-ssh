@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+# 测试用的假 ssh：记录参数，然后把远程命令放在本地执行（HOME 指向假的远程家目录）。
+log="${FAKE_SSH_LOG:-/dev/null}"
+printf '%s\n' "$*" >> "$log"
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o|-p|-i|-J|-O) shift 2 ;;
+    -n|-t|-tt) shift ;;
+    -*) shift ;;
+    *) break ;;
+  esac
+done
+host="${1:-}"
+shift || true
+[ -n "$host" ] || exit 255
+[ "$#" -gt 0 ] || exit 0   # 交互登录：什么都不做
+cmd="$*"
+exec env -u XDG_CONFIG_HOME -u XDG_DATA_HOME HOME="${FAKE_REMOTE_HOME:?}" bash -c "$cmd"

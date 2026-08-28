@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+# 测试用的假 shpool：记录调用参数，返回固定的会话列表。
+log="${FAKE_SHPOOL_LOG:-/dev/null}"
+printf '%s\n' "$*" >> "$log"
+
+# 跳过全局选项（-s socket -c config -D …）
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -s|-c|-l|--socket|--config-file|--log-file) shift 2 ;;
+    -D|-d|-v) shift ;;
+    *) break ;;
+  esac
+done
+
+json="${FAKE_SHPOOL_JSON:-/dev/null}"
+case "${1:-}" in
+  version) printf 'shpool 0.0.0-fake\n' ;;
+  list)
+    if [ "${2:-}" = --json ] || [ "${2:-}" = -j ]; then
+      cat "$json"
+    else
+      printf 'NAME\tSTATUS\n'
+      awk -F'"' '/"name":/ { n = $4 } /"status":/ { printf "%s\t%s\n", n, tolower($4) }' "$json"
+    fi
+    ;;
+  attach) exit "${FAKE_ATTACH_RC:-0}" ;;
+  kill|detach) exit 0 ;;
+  *) printf 'fake-shpool: unknown command %s\n' "${1:-}" >&2; exit 2 ;;
+esac

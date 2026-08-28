@@ -1,0 +1,25 @@
+{
+  "sessions": [
+    {
+      "name": "latte",
+      "started_at_unix_ms": 1787755401019,
+      "last_connected_at_unix_ms": 1787755401019,
+      "last_disconnected_at_unix_ms": 1787760000000,
+      "status": "Disconnected"
+    },
+    {
+      "name": "anna",
+      "started_at_unix_ms": 1787806408053,
+      "last_connected_at_unix_ms": 1787906116901,
+      "last_disconnected_at_unix_ms": null,
+      "status": "Attached"
+    },
+    {
+      "name": "work",
+      "started_at_unix_ms": 1787800000000,
+      "last_connected_at_unix_ms": 1787868593045,
+      "last_disconnected_at_unix_ms": 1787870000000,
+      "status": "Disconnected"
+    }
+  ]
+}

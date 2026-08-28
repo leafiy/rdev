@@ -2,280 +2,177 @@
 
 [![test](https://github.com/leafiy/rdev/actions/workflows/test.yml/badge.svg)](https://github.com/leafiy/rdev/actions/workflows/test.yml)
 
-在你自己的终端里管理可恢复的远程开发会话。
+**agent 远程开发时代，何必为了 agent 换掉你熟悉的终端工具。**
 
-`rdev` 提供一个简单的主机与工作区菜单，通过 SSH 连接远端，并使用轻量的
-`dtach` 保持远端 shell 存活。网络中断后自动重连；重新打开同一个工作区时，回到
-原来的 shell。它不会打开新的终端窗口，也不依赖 Mosh、tmux 或 WezTerm。
+一行命令配置好服务器。之后照常 `ssh`，登录时看到会话菜单，回车恢复上次的 shell，里面的 Claude Code / Codex / OpenCode 还在原地跑。SSH 断了、合盖了、换网了都无所谓。本机不装任何东西。
 
-> Persistent remote shells in the terminal you already use. SSH for transport,
-> dtach for session persistence, and no extra terminal window.
+> Keep your terminal. Keep your agent. One curl on your laptop makes any server resume your shell on the next `ssh`. Nothing to install locally.
 
-## 特性
-
-- 使用当前终端：支持 Otty、Terminal.app、iTerm2、Kitty、Ghostty 等。
-- 持久工作区：SSH 断开后，远端 shell 和其中运行的程序继续存在。
-- 自动重连：网络切换或临时断网后自动重新附加。
-- 原生终端交互：鼠标选择、滚轮、剪贴板、字体、配色和链接均由当前终端处理。
-- 主机菜单：保存多个节点、SSH 端口、密钥和跳板机配置。
-- 工作区菜单：每个节点可创建多个命名会话。
-- 自动安装：远端缺少 `dtach` 时可在首次连接时安装。
-- 配置隔离：所有文件都位于 `~/.config/rdev`，不修改 `~/.ssh/config`。
-- 兼容 Bash 3.2：可直接运行在 macOS 自带 Bash 上。
-
-## 工作方式
-
-```text
-当前终端 -> SSH -> dtach -> 远端登录 shell
-```
-
-`dtach` 只负责让远端进程脱离 SSH 连接继续运行，不解释终端输入和输出。因此，
-rdev 不会捕获鼠标，也不会引入 tmux copy-mode 一类的额外交互状态。
-
-连接意外中断时：
-
-1. 远端 `dtach` 会话继续运行；
-2. rdev 等待 `reconnect_delay` 秒；
-3. SSH 恢复后自动附加到同一个 shell。
-
-正常执行 `exit` 时，会话结束，rdev 不会重连。
+宣传页：<https://leafiy.github.io/rdev/>
 
 ## 安装
 
-### 从 GitHub 安装
-
-```bash
-git clone https://github.com/leafiy/rdev.git
-cd rdev
-./install.sh
-```
-
-### 一行安装
+在你自己的电脑上运行，按提示输入服务器地址（`user@host`、`user@host:2222` 或 `~/.ssh/config` 里的别名）：
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/leafiy/rdev/main/install.sh | bash
 ```
 
-默认安装位置：
+直接指定目标：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/leafiy/rdev/main/install.sh | bash -s -- dev@box:2222 -i ~/.ssh/id_ed25519
+```
+
+已经在服务器里了：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/leafiy/rdev/main/install.sh | bash -s -- --here
+```
+
+脚本做的事：
+
+1. 用 ssh 连到服务器，全程复用一条连接，密码只输一次。
+2. 在本机下载 [shpool](https://github.com/shell-pool/shpool) 的静态二进制并推过去。服务器访问不了 GitHub 也没关系；不需要 root，不装系统包。
+3. 写一份 shpool 配置到 `~/.config/rdev/shpool.toml`：不改提示符，重连只交还不回放。
+4. 在 `~/.zshrc` / `~/.bashrc` 末尾加一段带标记的钩子，只在交互式 SSH 登录时弹菜单。`ssh host 命令`、scp、rsync、git、VS Code Remote 一律不受影响。
+
+需要：本机有 `ssh` 和 `curl`（macOS、Linux、WSL）；服务器是 Linux x86_64 / arm64（或 Apple Silicon 的 macOS），登录 shell 为 zsh 或 bash。
+
+## 用法
 
 ```text
-~/.local/bin/rdev
+$ ssh dev@box
+
+rdev · box  3 个会话
+
+   1) work     Claude Code 运行中 · 可恢复 · 2 分钟前
+   2) infra    空闲 · 可恢复 · 3 小时前
+   3) anna     Codex 运行中 · 已连接，选择即接管 · 刚刚
+
+  回车 恢复 work · 数字 选择 · n 新建 · 直接输入名称 新建 · k 数字 删除 · q 普通 shell
+  会话里按 Ctrl-Space Ctrl-q 可随时离开而不结束它。
+
+>
 ```
 
-如果 `~/.local/bin` 不在 `PATH` 中：
-
-```bash
-export PATH="$HOME/.local/bin:$PATH"
-```
-
-### 本机依赖
-
-- Bash 3.2 或更高版本；
-- OpenSSH；
-- 标准 `awk`、`sed`、`cksum` 工具。
-
-本机不需要安装 `dtach`。它只运行在远端。
-
-## 快速开始
-
-### 添加节点
-
-```bash
-rdev add "Build server" 10.0.0.8 --user developer
-```
-
-指定 SSH 端口、私钥和跳板机：
-
-```bash
-rdev add "Devbox" devbox.example.com \
-  --user root \
-  --port 2224 \
-  --identity ~/.ssh/id_ed25519 \
-  --proxy-jump bastion
-```
-
-也可以进入交互式添加流程：
-
-```bash
-rdev add
-```
-
-### 打开远程工作区
-
-```bash
-rdev
-```
-
-依次选择：
-
-1. 远程节点；
-2. 已有工作区，或创建新的命名工作区。
-
-SSH 会直接占用当前终端，不会打开其他应用或窗口。
-
-### 恢复上次工作区
-
-```bash
-rdev resume
-```
-
-## 会话控制
-
-| 操作 | 结果 |
+| 想做什么 | 怎么做 |
 | --- | --- |
-| `exit` | 结束远端 shell 和对应工作区 |
-| `Ctrl-\` | 从 dtach 分离，但保留远端 shell |
-| `Ctrl-C` | 停止正在等待的自动重连 |
-| `rdev resume` | 重新进入上次节点和工作区 |
+| 恢复上次的会话 | 回车 |
+| 新建会话 | `n`，或直接输入一个名称 |
+| 从另一个终端接管 | 选一个“已连接”的会话 |
+| 离开会话但不结束 | `Ctrl-Space` `Ctrl-q`，或者直接关窗口 |
+| 结束会话 | 在会话里 `exit`，或菜单里 `k 编号` |
+| 不进菜单，用普通 shell | `q` |
+| 跳过菜单直达会话 | `ssh -t dev@box '~/.local/bin/rdev attach work'` |
+| 完全不触发菜单登录 | `ssh -t dev@box 'RDEV_SKIP=1 exec $SHELL -l'` |
 
-## 命令
-
-```text
-rdev                         打开节点与工作区菜单
-rdev resume                  恢复上次远程工作区
-rdev menu                    打开节点与工作区菜单
-rdev add [NAME HOST] [...]   添加节点；不带参数时使用交互模式
-rdev list                    列出节点
-rdev remove ID|NUMBER        删除节点
-rdev edit                    编辑节点配置
-rdev config                  显示配置文件路径
-rdev doctor                  检查本机依赖
-rdev version                 显示版本
-rdev help                    显示帮助
-```
-
-查看添加节点的全部参数：
-
-```bash
-rdev add --help
-```
-
-## 配置
-
-所有状态都保存在：
+服务器上的命令：
 
 ```text
-~/.config/rdev/config            通用设置
-~/.config/rdev/nodes.conf        节点定义
-~/.config/rdev/ssh_config        rdev 专用 SSH 配置
-~/.config/rdev/workspaces.conf   已知工作区
-~/.config/rdev/last-connection   上次节点和工作区
-~/.config/rdev/control/          OpenSSH ControlMaster socket
+rdev                     会话菜单
+rdev attach 名称         直接进入（不存在则新建）
+rdev new [名称]          新建会话
+rdev list                列出会话、状态、里面在跑的 agent
+rdev detach [名称…]      让会话脱离当前终端（不结束）
+rdev kill 名称…          结束会话
+rdev setup               安装 / 更新（下载 shpool、写配置、加钩子）
+rdev doctor              检查安装状态
+rdev uninstall [--purge] 移除
 ```
 
-### 通用设置
+## 它是怎么工作的
 
-```ini
-auto_install_remote=yes
-connect_timeout=10
-reconnect_delay=2
+```text
+你的终端  →  ssh  →  rdev 菜单  →  shpool 会话（shell + agent 常驻）
 ```
 
-| 设置 | 说明 |
+- **shpool** 是 Google 开源的会话保持工具，只做一件事：把 shell 从 SSH 连接里解耦。它不是终端复用器，不画窗格，不接管键盘鼠标，所以终端还是你的终端。
+- **重连只交还不回放。** 重新连上后，终端被交还给原来的程序并收到 SIGWINCH，Claude Code 这类 TUI 会自己把界面画回来，不会错位、不会重复。断线前已经输出到你终端里的内容仍在你自己的回滚缓冲里，鼠标滚轮照常用。
+- **登录钩子只在交互式 SSH 登录时触发**（`SSH_TTY` 存在、不在会话内、有终端），zsh 用 ZLE 的 `line-init` 钩子，等提示符就绪后再弹菜单，与 powerlevel10k instant prompt 等兼容。
+- **守护进程按需拉起。** 服务器重启后第一次登录时 shpool 会自动启动守护进程，不依赖 systemd。有 `loginctl` 时会顺手开启 linger。
+
+## 它改了什么
+
+| 位置 | 内容 |
 | --- | --- |
-| `auto_install_remote` | 远端缺少 dtach 时是否自动安装 |
-| `connect_timeout` | SSH 连接超时秒数 |
-| `reconnect_delay` | 意外断线后的重连等待秒数 |
+| `~/.local/bin/rdev` | 本程序（一个 bash 脚本） |
+| `~/.local/share/rdev/bin/shpool` | 下载的 shpool 静态二进制（系统已有 shpool 时不下载） |
+| `~/.config/rdev/shpool.toml` | shpool 配置，可随意修改，`rdev setup` 不会覆盖 |
+| `~/.config/rdev/env` | 可选，覆盖 `RDEV_*` 变量（见下） |
+| `~/.local/run/rdev/` | socket 与守护进程日志 |
+| `~/.zshrc` / `~/.bashrc` | 末尾一段 `# >>> rdev >>> … # <<< rdev <<<` 钩子 |
 
-设置 `auto_install_remote=no` 可以禁止修改远端软件包。
+不碰 sshd、`~/.ssh/config`，不需要 root。
 
-### 节点格式
+### 可覆盖的变量
 
-```text
-id|label|host|user|ssh_port|identity_file|proxy_jump
+写在 `~/.config/rdev/env`（POSIX sh 语法）：
+
+```sh
+RDEV_SHPOOL_BIN=/usr/bin/shpool                  # 用指定的 shpool
+RDEV_SHPOOL_SOCKET=/run/user/1000/shpool/shpool.socket   # 接入已有的 shpool 守护进程
+RDEV_SHPOOL_CONFIG=~/.config/shpool/config.toml  # 用已有的 shpool 配置
+RDEV_RUN_DIR=~/.local/run/rdev                   # socket 与日志目录
+RDEV_SHPOOL_VERSION=v0.11.3                      # rdev setup 下载的版本
 ```
 
-示例：
+### 默认的 shpool 配置
 
-```text
-work|Work server|10.0.0.8|developer|22||
-devbox|Devbox|devbox.example.com|root|2224|~/.ssh/id_ed25519|bastion
+```toml
+prompt_prefix = ""                 # 不往提示符里塞会话名
+session_restore_mode = "simple"    # 重连只交还并 SIGWINCH，不回放历史
+output_spool_lines = 65535
+vt100_output_spool_width = 240
 ```
 
-通常应使用 `rdev add` 管理节点，而不是直接编辑此文件。
+想在新窗口重连时也看到最近的输出，可以把 `session_restore_mode` 改成 `"screen"` 或 `{ lines = 2000 }`；代价是 TUI 程序重连后可能出现重复画面。
 
-## 远端自动安装
+## 常见问题
 
-首次连接时，如果远端没有 `dtach`，rdev 支持使用以下包管理器安装：
+**和 tmux、mosh 有什么区别？** tmux 是终端复用器，会接管整个终端：窗格、前缀键、copy-mode、自己的鼠标处理。mosh 解决的是网络抖动和漫游，本身不保持会话，还要本机装客户端、服务器开 UDP。rdev 只做会话保持，本机零安装，走普通 ssh。
 
-- Debian / Ubuntu：`apt-get`；
-- Fedora / RHEL：`dnf`；
-- Arch Linux：`pacman`；
-- openSUSE：`zypper`；
-- Alpine Linux：`apk`；
-- macOS / Linuxbrew：`brew`。
+**服务器重启了会怎样？** 会话消失（和 tmux 一样）。之后第一次登录会自动拉起守护进程。
 
-自动安装需要远端 root 权限或可用的 `sudo`。
+**多个终端能同时连同一个会话吗？** 同一时间一个会话只属于一个终端；选一个“已连接”的会话就会从原终端接管过来。想并行就多开会话。
 
-## 滚动历史说明
+**登录 shell 是 fish？** 目前只自动接管 zsh 和 bash。可以在 fish 的启动文件里自己调用 `~/.local/bin/rdev`：退出码 0 表示会话已结束，此时应退出登录 shell；退出码 10 表示用户选择了普通 shell。
 
-`dtach` 会保存远端进程和 shell 命令历史，但不会维护独立的服务器端屏幕回滚缓冲区。
+**systemd 的 `KillUserProcesses=yes`？** 这会让注销时杀掉所有后台进程，任何会话保持工具都活不下来。把 `/etc/systemd/logind.conf` 里的它改成 `no`。`rdev doctor` 会提示。
 
-- 当前终端窗口已经接收的内容仍保留在该终端的 scrollback 中；
-- 重新连接时可以恢复正在运行的程序和当前画面；
-- 新终端无法重建断线前所有已经输出的屏幕内容。
-
-这是使用任意本机终端、同时不引入 tmux/WezTerm 终端协议的取舍。
-
-## 从旧版本升级
-
-重新执行：
-
-```bash
-./install.sh
-```
-
-rdev 0.2 的旧节点格式会自动迁移，并保留备份：
-
-```text
-nodes.conf.pre-dtach.TIMESTAMP
-```
-
-旧的 Mosh、tmux 或 WezTerm 进程不会被停止或删除；rdev 0.4 只是不再使用它们。
-
-## 安全
-
-- SSH 负责认证、主机密钥检查、私钥和跳板机；
-- rdev 不修改 `~/.ssh/config`；
-- 节点、工作区和状态文件权限为 `0600`；
-- 远端 dtach 会话目录权限为 `0700`；
-- SSH 参数以数组传递，节点字段会经过格式校验；
-- 可关闭远端自动安装。
-
-## 开发与测试
-
-```bash
-./tests/test_syntax.sh
-./tests/test_cli.sh
-./tests/test_active_connection.sh
-./tests/test_session_listing.sh
-./tests/test_auto_install.sh
-```
-
-测试覆盖：
-
-- Bash 语法；
-- CLI 与旧配置迁移；
-- 当前终端连接；
-- 意外断线重连与正常退出；
-- 工作区菜单；
-- 远端 dtach 自动安装。
-
-CI 在 Ubuntu 和 macOS 上运行。
+**守护进程起不来？** 看 `~/.local/run/rdev/daemonized-shpool.log`，或运行 `rdev doctor`。
 
 ## 卸载
 
-保留配置：
+在服务器上：
 
 ```bash
-./uninstall.sh
+rdev uninstall           # 保留 ~/.config/rdev
+rdev uninstall --purge   # 连配置一起删
 ```
 
-同时删除 `~/.config/rdev`：
+或在本机：
 
 ```bash
-./uninstall.sh --purge
+curl -fsSL https://raw.githubusercontent.com/leafiy/rdev/main/install.sh | bash -s -- --uninstall dev@box
 ```
+
+正在运行的会话和守护进程不受影响，需要的话用 `shpool kill` 结束。
+
+## 开发与测试
+
+全部是 bash，兼容 macOS 自带的 bash 3.2。测试用假的 `shpool` 和 `ssh`，不需要网络：
+
+```bash
+tests/test_syntax.sh     # 语法与 bash 3.2 兼容性
+tests/test_menu.sh       # 菜单、列表解析、退出码
+tests/test_setup.sh      # setup / doctor / uninstall、钩子幂等
+tests/test_install.sh    # 一键安装脚本（假 ssh 在本地执行远程命令）
+```
+
+CI 在 Ubuntu 和 macOS（`/bin/bash` 3.2）上运行。
+
+宣传页在 `docs/index.html`，素材位说明见 `docs/assets/README.md`。
 
 ## License
 

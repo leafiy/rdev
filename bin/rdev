@@ -1,608 +1,798 @@
 #!/usr/bin/env bash
+# rdev · 远程机器上的会话入口：SSH 登录后恢复 / 新建 / 接管持久会话
+# https://github.com/leafiy/rdev
+#
+# 设计要点
+#   - 不是终端复用器：不接管鼠标、不劫持滚动、不改提示符。终端仍是你本机的终端。
+#   - 会话由 shpool 守护进程持有；SSH 断开后 shell 与其中运行的 agent 继续运行。
+#   - 退出码约定（shell rc 钩子据此决定是否退出登录 shell）：
+#       0    会话已结束（shell 退出）→ 钩子随即退出登录 shell，SSH 正常关闭
+#       10   用户选择留在普通 shell
+#       其他 出错 → 钩子保留普通 shell，便于排查
+#
+# 兼容 bash 3.2（macOS 自带）。
 
-# rdev — persistent remote shells in the current terminal.
-# All state is isolated under ~/.config/rdev and never modifies ~/.ssh/config.
+RDEV_VERSION="1.0.0"
+RDEV_REPO="${RDEV_REPO:-leafiy/rdev}"
+RDEV_EXIT_PLAIN=10
 
-set -o pipefail
+# ---------------------------------------------------------------------------
+# 路径与可覆盖项。~/.config/rdev/env 里可以覆盖任意 RDEV_* 变量（POSIX sh 语法）。
+# ---------------------------------------------------------------------------
+RDEV_CONFIG_DIR="${RDEV_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/rdev}"
+if [ -r "$RDEV_CONFIG_DIR/env" ]; then
+  # shellcheck disable=SC1090
+  . "$RDEV_CONFIG_DIR/env"
+fi
+RDEV_HOME="${RDEV_HOME:-${XDG_DATA_HOME:-$HOME/.local/share}/rdev}"
+RDEV_BIN_DIR="${RDEV_BIN_DIR:-$HOME/.local/bin}"
+RDEV_RUN_DIR="${RDEV_RUN_DIR:-$HOME/.local/run/rdev}"
+RDEV_SHPOOL_CONFIG="${RDEV_SHPOOL_CONFIG:-$RDEV_CONFIG_DIR/shpool.toml}"
+RDEV_SHPOOL_SOCKET="${RDEV_SHPOOL_SOCKET:-$RDEV_RUN_DIR/shpool.socket}"
+RDEV_SHPOOL_BIN="${RDEV_SHPOOL_BIN:-}"
+RDEV_SHPOOL_VERSION="${RDEV_SHPOOL_VERSION:-v0.11.3}"
+RDEV_SHPOOL_RELEASES="${RDEV_SHPOOL_RELEASES:-https://github.com/shell-pool/shpool/releases/download}"
 
-RDEV_VERSION="0.4.0"
-APP_NAME="${RDEV_APP_NAME:-rdev · 远程开发}"
-CONFIG_DIR="${RDEV_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/rdev}"
-NODES_FILE="$CONFIG_DIR/nodes.conf"
-SETTINGS_FILE="$CONFIG_DIR/config"
-SSH_CONFIG="$CONFIG_DIR/ssh_config"
-STATE_FILE="$CONFIG_DIR/last-node"
-LAST_CONNECTION_FILE="$CONFIG_DIR/last-connection"
-WORKSPACES_FILE="$CONFIG_DIR/workspaces.conf"
-CONTROL_DIR="$CONFIG_DIR/control"
+SHPOOL=""
+SESSION_NAMES=()
+SESSION_STATUSES=()
+SESSION_LAST=()
+SESSION_ACTIVITY=()
 
-SSH_BIN="${RDEV_SSH_BIN:-$(command -v ssh 2>/dev/null || printf ssh)}"
-
-NODE_IDS=()
-NODE_LABELS=()
-NODE_HOSTS=()
-NODE_USERS=()
-NODE_PORTS=()
-NODE_IDENTITIES=()
-NODE_PROXY_JUMPS=()
-NODE_SSH_ARGS=()
-WORKSPACE_NAMES=()
-
-AUTO_INSTALL_REMOTE="yes"
-CONNECT_TIMEOUT="10"
-RECONNECT_DELAY="2"
-
-# This script intentionally expands only on the remote host.
-# shellcheck disable=SC2016
-REMOTE_PREPARE='set -e
-export PATH="$HOME/.local/bin:$HOME/.bun/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:$PATH"
-
-rdev_run_root() {
-  if [ "$(id -u)" -eq 0 ]; then
-    "$@"
-  elif command -v sudo >/dev/null 2>&1; then
-    sudo "$@"
-  else
-    echo "dtach is missing and sudo is unavailable." >&2
-    return 126
-  fi
-}
-
-if ! command -v dtach >/dev/null 2>&1; then
-  if [ "$rdev_auto_install" != "yes" ]; then
-    echo "Remote dtach is not installed." >&2
-    exit 127
-  fi
-  echo "First connection: installing dtach on the remote node…" >&2
-  if command -v apt-get >/dev/null 2>&1; then
-    rdev_run_root env DEBIAN_FRONTEND=noninteractive apt-get update -qq >&2
-    rdev_run_root env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq dtach >&2
-  elif command -v dnf >/dev/null 2>&1; then
-    rdev_run_root dnf install -y dtach >&2
-  elif command -v pacman >/dev/null 2>&1; then
-    rdev_run_root pacman -Sy --noconfirm dtach >&2
-  elif command -v zypper >/dev/null 2>&1; then
-    rdev_run_root zypper --non-interactive install dtach >&2
-  elif command -v apk >/dev/null 2>&1; then
-    rdev_run_root apk add dtach >&2
-  elif command -v brew >/dev/null 2>&1; then
-    brew install dtach >&2
-  else
-    echo "No supported dtach package source was found on the remote node." >&2
-    exit 127
-  fi
+# ---------------------------------------------------------------------------
+# 输出工具
+# ---------------------------------------------------------------------------
+if [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; then
+  C_BOLD=$'\033[1m' C_DIM=$'\033[2m' C_GREEN=$'\033[32m' C_YELLOW=$'\033[33m' C_RED=$'\033[31m' C_RESET=$'\033[0m'
+else
+  C_BOLD='' C_DIM='' C_GREEN='' C_YELLOW='' C_RED='' C_RESET=''
 fi
 
-hash -r 2>/dev/null || true
-command -v dtach >/dev/null 2>&1 ||
-  { echo "Remote dtach installation did not provide an executable." >&2; exit 127; }'
+say()  { printf '%s\n' "$*"; }
+warn() { printf '%srdev:%s %s\n' "$C_YELLOW" "$C_RESET" "$*" >&2; }
+fail() { printf '%srdev:%s %s\n' "$C_RED" "$C_RESET" "$*" >&2; }
+die()  { fail "$@"; exit 1; }
 
-REMOTE_ATTACH='set -e
-umask 077
-rdev_session_dir="${XDG_RUNTIME_DIR:-$HOME/.cache}/rdev/sessions"
-mkdir -p "$rdev_session_dir"
-chmod 700 "$rdev_session_dir" 2>/dev/null || true
-rdev_socket="$rdev_session_dir/$rdev_session.sock"
-rdev_shell="${SHELL:-/bin/sh}"
-exec dtach -A "$rdev_socket" -r winch "$rdev_shell" -l'
-
-cleanup_screen() {
-  printf '\033[0m\033[?25h'
+# 断线时远端程序可能开着鼠标跟踪 / 括号粘贴 / 隐藏光标，本机终端会一直卡在那个状态。
+# 进菜单前和离开会话后都复位一次，避免“鼠标一动就输入锁死”。
+terminal_reset() {
+  printf '\033[?1000l\033[?1002l\033[?1003l\033[?1005l\033[?1006l\033[?1015l\033[?1004l\033[?2004l\033[?25h\033[<u'
 }
 
-install_ui_traps() {
-  trap cleanup_screen EXIT
-  trap 'printf "\n"; exit 130' INT
-  trap 'printf "\n"; exit 129' HUP
-  trap 'printf "\n"; exit 143' TERM
+short_host() {
+  local h
+  h="$(hostname -s 2>/dev/null || hostname 2>/dev/null || printf '%s' "${HOSTNAME:-remote}")"
+  printf '%s' "${h%%.*}"
 }
 
-write_default_settings() {
-  [ -e "$SETTINGS_FILE" ] && return 0
-  umask 077
-  {
-    printf '%s\n' \
-      '# rdev settings' \
-      'auto_install_remote=yes' \
-      'connect_timeout=10' \
-      'reconnect_delay=2'
-  } > "$SETTINGS_FILE"
-}
-
-write_default_ssh_config() {
-  [ -e "$SSH_CONFIG" ] && return 0
-  umask 077
-  {
-    printf '%s\n' \
-      '# rdev-only SSH options used while preparing remote nodes.' \
-      '# Add Host blocks here when a node needs custom SSH options.' \
-      'Include ~/.ssh/config'
-  } > "$SSH_CONFIG"
-}
-
-init_config() {
-  umask 077
-  mkdir -p "$CONFIG_DIR" "$CONTROL_DIR"
-  chmod 700 "$CONFIG_DIR" "$CONTROL_DIR" 2>/dev/null || true
-  [ -e "$NODES_FILE" ] || printf '%s\n' '# id|label|host|user|ssh_port|identity_file|proxy_jump' > "$NODES_FILE"
-  [ -e "$WORKSPACES_FILE" ] || printf '%s\n' '# node_id|workspace' > "$WORKSPACES_FILE"
-  chmod 600 "$NODES_FILE" "$WORKSPACES_FILE" 2>/dev/null || true
-  write_default_settings
-  write_default_ssh_config
-}
-
-load_settings() {
-  local key value
-  while IFS='=' read -r key value; do
-    case "$key" in
-      ''|\#*) continue ;;
-      auto_install_remote) [ "$value" = yes ] || [ "$value" = no ] || continue; AUTO_INSTALL_REMOTE="$value" ;;
-      connect_timeout) case "$value" in *[!0-9]*|'') continue ;; esac; CONNECT_TIMEOUT="$value" ;;
-      reconnect_delay) case "$value" in *[!0-9]*|'') continue ;; esac; RECONNECT_DELAY="$value" ;;
-    esac
-  done < "$SETTINGS_FILE"
-}
-
-slugify() {
-  local slug
-  slug="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9._-]/-/g; s/--*/-/g; s/^-//; s/-$//')"
-  [ -n "$slug" ] || slug="node-$(date +%s)"
-  REPLY="$slug"
-}
-
-validate_field() {
-  case "$2" in
-    *'|'*|*'
-'*) printf '%s cannot contain "|" or a newline.\n' "$1" >&2; return 1 ;;
+valid_name() {
+  case "$1" in
+    ''|*[!A-Za-z0-9._-]*|.*|-*) return 1 ;;
   esac
+  [ "${#1}" -le 64 ]
 }
 
-migrate_nodes_config() {
-  local fields backup temp line id label host user port transport socket identity proxy_jump mosh_port extra
-  fields="$(awk -F'|' '!/^[[:space:]]*(#|$)/ { print NF; exit }' "$NODES_FILE")"
-  case "$fields" in ''|7) return 0 ;; 4|10) ;; *) return 0 ;; esac
+# 把 unix 毫秒时间戳变成“3 分钟前”
+ago() {
+  local ms="$1" s
+  case "$ms" in ''|null|*[!0-9]*) return 0 ;; esac
+  s=$(( $(date +%s) - ms / 1000 ))
+  if [ "$s" -lt 60 ]; then printf '刚刚'
+  elif [ "$s" -lt 3600 ]; then printf '%d 分钟前' $((s / 60))
+  elif [ "$s" -lt 86400 ]; then printf '%d 小时前' $((s / 3600))
+  else printf '%d 天前' $((s / 86400)); fi
+}
 
-  backup="$NODES_FILE.pre-dtach.$(date +%Y%m%d%H%M%S)"
-  temp="$NODES_FILE.tmp.$$"
-  cp "$NODES_FILE" "$backup" || return 1
-  printf '%s\n' '# id|label|host|user|ssh_port|identity_file|proxy_jump' > "$temp"
+# ---------------------------------------------------------------------------
+# shpool
+# ---------------------------------------------------------------------------
+resolve_shpool() {
+  local candidate
+  for candidate in "$RDEV_SHPOOL_BIN" "$RDEV_HOME/bin/shpool" "$(command -v shpool 2>/dev/null)" "$HOME/.cargo/bin/shpool"; do
+    if [ -n "$candidate" ] && [ -x "$candidate" ]; then
+      SHPOOL="$candidate"
+      return 0
+    fi
+  done
+  return 1
+}
 
-  if [ "$fields" = 10 ]; then
-    while IFS='|' read -r id label host user port transport socket identity proxy_jump mosh_port extra; do
-      case "$id" in ''|\#*) continue ;; esac
-      [ -z "$extra" ] || continue
-      printf '%s|%s|%s|%s|%s|%s|%s\n' "$id" "$label" "$host" "$user" "$port" "$identity" "$proxy_jump" >> "$temp"
-    done < "$NODES_FILE"
+sp() {
+  "$SHPOOL" -s "$RDEV_SHPOOL_SOCKET" -c "$RDEV_SHPOOL_CONFIG" "$@"
+}
+
+write_shpool_config() {
+  mkdir -p "$(dirname "$RDEV_SHPOOL_CONFIG")"
+  cat > "$RDEV_SHPOOL_CONFIG" <<'TOML'
+# rdev 生成的 shpool 配置（https://github.com/leafiy/rdev）
+# 可以随意修改；rdev 不会覆盖已存在的文件（除非执行 rdev setup --reset-config）。
+
+# 保持终端原生：不往提示符里塞会话名。
+prompt_prefix = ""
+
+# 重连时只把终端交还给原来的程序，并发送 SIGWINCH 让 TUI（agent）自行重绘；
+# 不回放历史输出，所以 agent 的界面不会错乱、不会出现重复内容。
+# 你本机终端已经收到过的内容仍在你自己的回滚缓冲里，鼠标滚轮照常用。
+session_restore_mode = "simple"
+
+# 服务端输出缓冲上限。simple 模式下不用于回放，但保留给以后切换到 "screen" / { lines = N }。
+output_spool_lines = 65535
+vt100_output_spool_width = 240
+TOML
+}
+
+# 会话命令共用的准备：找到 shpool、保证配置与运行目录存在。守护进程由 shpool 在需要时自动拉起。
+ensure_ready() {
+  resolve_shpool || die "没找到 shpool。先运行：rdev setup"
+  [ -f "$RDEV_SHPOOL_CONFIG" ] || write_shpool_config
+  mkdir -p "$RDEV_RUN_DIR" 2>/dev/null
+  chmod 700 "$RDEV_RUN_DIR" 2>/dev/null || true
+}
+
+# 读取会话列表到数组：按最近连接时间倒序。
+load_sessions() {
+  local json lines line name status last
+  SESSION_NAMES=()
+  SESSION_STATUSES=()
+  SESSION_LAST=()
+  json="$(sp list --json 2>/dev/null)" || return 1
+
+  if command -v jq >/dev/null 2>&1; then
+    lines="$(printf '%s' "$json" | jq -r '
+      .sessions
+      | sort_by(.last_connected_at_unix_ms // 0) | reverse
+      | .[] | [.name, .status, (.last_connected_at_unix_ms // "null" | tostring)] | @tsv' 2>/dev/null)"
   else
-    while IFS='|' read -r label host socket transport extra; do
-      case "$label" in ''|\#*) continue ;; esac
-      [ -z "$extra" ] || continue
-      slugify "${host#rdev-}"
-      id="$REPLY"
-      line="$("$SSH_BIN" -G -F "$SSH_CONFIG" "$host" 2>/dev/null || true)"
-      user="$(printf '%s\n' "$line" | awk '$1=="user"{print $2;exit}')"
-      port="$(printf '%s\n' "$line" | awk '$1=="port"{print $2;exit}')"
-      [ -n "$user" ] || user="${USER:-$(id -un)}"
-      [ -n "$port" ] || port=22
-      printf '%s|%s|%s|%s|%s||\n' "$id" "$label" "$host" "$user" "$port" >> "$temp"
-    done < "$NODES_FILE"
+    # shpool 的 --json 是逐行缩进的，逐行解析足够；字段顺序 name … status。
+    lines="$(printf '%s\n' "$json" | awk '
+      /"name":/   { s = $0; sub(/.*"name": *"/, "", s); sub(/",?[[:space:]]*$/, "", s); name = s }
+      /"last_connected_at_unix_ms":/ { s = $0; sub(/.*: */, "", s); sub(/,?[[:space:]]*$/, "", s); last = s }
+      /"status":/ { s = $0; sub(/.*"status": *"/, "", s); sub(/",?[[:space:]]*$/, "", s); printf "%s\t%s\t%s\n", name, s, last }
+    ' | sort -t "$(printf '\t')" -k3,3nr)"
   fi
 
-  mv "$temp" "$NODES_FILE"
-  chmod 600 "$NODES_FILE"
-  printf 'Migrated node configuration for SSH + dtach. Backup: %s\n' "$backup" >&2
+  [ -n "$lines" ] || return 0
+  while IFS="$(printf '\t')" read -r name status last; do
+    [ -n "$name" ] || continue
+    SESSION_NAMES+=("$name")
+    SESSION_STATUSES+=("$status")
+    SESSION_LAST+=("$last")
+  done <<__RDEV_LINES__
+$lines
+__RDEV_LINES__
+  return 0
 }
 
-load_nodes() {
-  local id label host user port identity proxy_jump extra
-  NODE_IDS=()
-  NODE_LABELS=()
-  NODE_HOSTS=()
-  NODE_USERS=()
-  NODE_PORTS=()
-  NODE_IDENTITIES=()
-  NODE_PROXY_JUMPS=()
-
-  while IFS='|' read -r id label host user port identity proxy_jump extra; do
-    case "$id" in ''|\#*) continue ;; esac
-    if [ -n "$extra" ] || [ -z "$label" ] || [ -z "$host" ] || [ -z "$user" ] || [ -z "$port" ]; then
-      printf 'Invalid node configuration for "%s" in %s\n' "$id" "$NODES_FILE" >&2
-      return 1
-    fi
-    NODE_IDS[${#NODE_IDS[@]}]="$id"
-    NODE_LABELS[${#NODE_LABELS[@]}]="$label"
-    NODE_HOSTS[${#NODE_HOSTS[@]}]="$host"
-    NODE_USERS[${#NODE_USERS[@]}]="$user"
-    NODE_PORTS[${#NODE_PORTS[@]}]="$port"
-    NODE_IDENTITIES[${#NODE_IDENTITIES[@]}]="$identity"
-    NODE_PROXY_JUMPS[${#NODE_PROXY_JUMPS[@]}]="$proxy_jump"
-  done < "$NODES_FILE"
-}
-
-find_node_index() {
-  local reference="$1" i
-  case "$reference" in
-    *[!0-9]*|'') ;;
-    *)
-      if [ "$reference" -ge 1 ] 2>/dev/null && [ "$reference" -le "${#NODE_IDS[@]}" ]; then
-        REPLY="$((reference - 1))"
-        return 0
-      fi
-      ;;
+agent_label() {
+  case "$1" in
+    claude) printf 'Claude Code' ;;
+    codex) printf 'Codex' ;;
+    gemini) printf 'Gemini CLI' ;;
+    opencode) printf 'OpenCode' ;;
+    omp) printf 'OMP' ;;
+    pi) printf 'Pi' ;;
+    aider) printf 'Aider' ;;
+    goose) printf 'Goose' ;;
+    amp) printf 'Amp' ;;
+    copilot) printf 'Copilot' ;;
+    kimi) printf 'Kimi' ;;
+    qwen) printf 'Qwen Code' ;;
+    crush) printf 'Crush' ;;
+    cursor-agent) printf 'Cursor' ;;
+    droid) printf 'Droid' ;;
+    cline) printf 'Cline' ;;
+    '') printf '空闲' ;;
+    *) printf '%s' "$1" ;;
   esac
+}
+
+# 每个会话里正在跑什么（仅 Linux，有 /proc 时）。输出：name<TAB>comm
+session_activity() {
+  [ -r /proc/self/environ ] || return 0
+  local tree daemon_pid pid name best
+  tree="$(ps -eo pid=,ppid=,comm= 2>/dev/null)" || return 0
+  daemon_pid="$(ps -eo pid=,args= 2>/dev/null | awk -v s="$RDEV_SHPOOL_SOCKET" 'index($0, "--socket " s " daemon") { print $1; exit }')"
+  [ -n "$daemon_pid" ] || return 0
+  printf '%s\n' "$tree" | awk -v d="$daemon_pid" '$2 == d { print $1 }' | while read -r pid; do
+    name="$(tr '\0' '\n' < "/proc/$pid/environ" 2>/dev/null | sed -n 's/^SHPOOL_SESSION_NAME=//p' | head -n 1)"
+    [ -n "$name" ] || continue
+    best="$(printf '%s\n' "$tree" | awk -v root="$pid" '
+      { pid[NR] = $1; ppid[NR] = $2; comm[NR] = $3 }
+      END {
+        want[root] = 1; changed = 1
+        while (changed) {
+          changed = 0
+          for (i = 1; i <= NR; i++)
+            if (!(pid[i] in want) && (ppid[i] in want)) { want[pid[i]] = 1; changed = 1 }
+        }
+        best = ""
+        for (i = 1; i <= NR; i++) {
+          if (!(pid[i] in want) || pid[i] == root) continue
+          c = comm[i]
+          if (c ~ /^(claude|codex|gemini|opencode|omp|pi|aider|goose|amp|copilot|kimi|qwen|crush|cursor-agent|droid|cline)$/) { best = c; break }
+          if (best == "") best = c
+        }
+        print best
+      }')"
+    printf '%s\t%s\n' "$name" "$best"
+  done
+}
+
+load_activity() {
+  local i lines name comm
+  SESSION_ACTIVITY=()
   i=0
-  while [ "$i" -lt "${#NODE_IDS[@]}" ]; do
-    if [ "${NODE_IDS[$i]}" = "$reference" ]; then REPLY="$i"; return 0; fi
+  while [ "$i" -lt "${#SESSION_NAMES[@]}" ]; do SESSION_ACTIVITY+=(''); i=$((i + 1)); done
+  lines="$(session_activity)"
+  [ -n "$lines" ] || return 0
+  while IFS="$(printf '\t')" read -r name comm; do
+    i=0
+    while [ "$i" -lt "${#SESSION_NAMES[@]}" ]; do
+      if [ "${SESSION_NAMES[$i]}" = "$name" ]; then SESSION_ACTIVITY[$i]="$(agent_label "$comm")"; fi
+      i=$((i + 1))
+    done
+  done <<__RDEV_LINES__
+$lines
+__RDEV_LINES__
+}
+
+# 进入会话。返回 0 表示“会话已结束”，返回 2 表示“已离开但会话仍在”，返回 1 表示进入失败。
+attach_session() {
+  local name="$1" started rc
+  printf '\n%s进入会话 %s%s%s\n' "$C_DIM" "$C_RESET$C_BOLD" "$name" "$C_RESET"
+  terminal_reset
+  started="$(date +%s)"
+  sp attach -f -- "$name"
+  rc=$?
+  terminal_reset
+  if [ "$rc" -ne 0 ] && [ $(( $(date +%s) - started )) -lt 3 ]; then
+    fail "无法进入会话 $name（shpool attach 退出码 $rc）。试试：rdev doctor"
+    return 1
+  fi
+  if sp list 2>/dev/null | awk 'NR > 1 { print $1 }' | grep -qx -- "$name"; then
+    printf '\n%s已离开会话 %s，它仍在后台运行。%s\n' "$C_DIM" "$name" "$C_RESET"
+    return 2
+  fi
+  printf '\n%s会话 %s 已结束。%s\n' "$C_DIM" "$name" "$C_RESET"
+  return 0
+}
+
+inside_session_guard() {
+  if [ -n "${SHPOOL_SESSION_NAME:-}" ]; then
+    fail "你已经在会话 ${SHPOOL_SESSION_NAME} 里了。先按 Ctrl-Space Ctrl-q 离开（不会结束会话），再选别的会话。"
+    return 1
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# 菜单
+# ---------------------------------------------------------------------------
+render_menu() {
+  local i width name status last activity line default_hint
+  width=8
+  for name in ${SESSION_NAMES[@]+"${SESSION_NAMES[@]}"}; do
+    [ "${#name}" -gt "$width" ] && width="${#name}"
+  done
+  [ "$width" -gt 28 ] && width=28
+
+  printf '\n%s%s%s  %s%s%s\n\n' "$C_BOLD" "rdev · $(short_host)" "$C_RESET" "$C_DIM" \
+    "$(if [ "${#SESSION_NAMES[@]}" -eq 0 ]; then printf '还没有会话'; else printf '%d 个会话' "${#SESSION_NAMES[@]}"; fi)" "$C_RESET"
+
+  i=0
+  while [ "$i" -lt "${#SESSION_NAMES[@]}" ]; do
+    name="${SESSION_NAMES[$i]}"
+    status="${SESSION_STATUSES[$i]}"
+    last="${SESSION_LAST[$i]}"
+    activity="${SESSION_ACTIVITY[$i]:-}"
+    case "$status" in
+      Disconnected) line="${C_GREEN}可恢复${C_RESET}" ;;
+      Attached)     line="${C_YELLOW}已连接，选择即接管${C_RESET}" ;;
+      *)            line="$status" ;;
+    esac
+    [ -n "$activity" ] && [ "$activity" != '空闲' ] && line="${C_BOLD}${activity}${C_RESET} 运行中 · $line"
+    [ "$activity" = '空闲' ] && line="空闲 · $line"
+    [ -n "$(ago "$last")" ] && line="$line ${C_DIM}· $(ago "$last")${C_RESET}"
+    printf "  %s%2d%s) %-${width}s  %s\n" "$C_BOLD" "$((i + 1))" "$C_RESET" "$name" "$line"
+    i=$((i + 1))
+  done
+
+  default_hint='回车 新建'
+  i=0
+  while [ "$i" -lt "${#SESSION_NAMES[@]}" ]; do
+    if [ "${SESSION_STATUSES[$i]}" = Disconnected ]; then default_hint="回车 恢复 ${SESSION_NAMES[$i]}"; break; fi
+    i=$((i + 1))
+  done
+  printf '\n  %s%s · 数字 选择 · n 新建 · 直接输入名称 新建 · k 数字 删除 · q 普通 shell%s\n' "$C_DIM" "$default_hint" "$C_RESET"
+  printf '  %s会话里按 Ctrl-Space Ctrl-q 可随时离开而不结束它。%s\n\n' "$C_DIM" "$C_RESET"
+}
+
+default_session() {
+  local i=0
+  while [ "$i" -lt "${#SESSION_NAMES[@]}" ]; do
+    if [ "${SESSION_STATUSES[$i]}" = Disconnected ]; then printf '%s' "${SESSION_NAMES[$i]}"; return 0; fi
     i=$((i + 1))
   done
   return 1
 }
 
-build_ssh_args() {
-  local index="$1"
-  NODE_SSH_ARGS=(
-    -F "$SSH_CONFIG"
-    -p "${NODE_PORTS[$index]}"
-    -l "${NODE_USERS[$index]}"
-    -o "ConnectTimeout=$CONNECT_TIMEOUT"
-    -o ControlMaster=auto
-    -o "ControlPath=$CONTROL_DIR/%C"
-    -o ControlPersist=60
-  )
-  [ -n "${NODE_IDENTITIES[$index]}" ] && NODE_SSH_ARGS+=( -i "${NODE_IDENTITIES[$index]}" )
-  [ -n "${NODE_PROXY_JUMPS[$index]}" ] && NODE_SSH_ARGS+=( -J "${NODE_PROXY_JUMPS[$index]}" )
+prompt_new_name() {
+  local suggested="session-$(date +%m%d-%H%M)" name
+  printf '新会话名称 [%s]: ' "$suggested"
+  IFS= read -r name || return 1
+  name="${name:-$suggested}"
+  if ! valid_name "$name"; then
+    fail '名称只能包含字母、数字、. _ -，且不能以 . 或 - 开头。'
+    return 1
+  fi
+  printf '%s' "$name"
 }
 
-header() {
-  command -v clear >/dev/null 2>&1 && clear 2>/dev/null || printf '\033[2J\033[H'
-  printf '\033[1;36m%s\033[0m\n' "$APP_NAME"
-  printf '%s\n\n' '────────────────────────────────────────'
+kill_session_interactive() {
+  local index="$1" name answer
+  case "$index" in ''|*[!0-9]*) fail '用法：k 数字'; return 1 ;; esac
+  index=$((10#$index))
+  if [ "$index" -lt 1 ] || [ "$index" -gt "${#SESSION_NAMES[@]}" ]; then fail '没有这个编号。'; return 1; fi
+  name="${SESSION_NAMES[$((index - 1))]}"
+  printf '结束会话 %s 并杀掉里面的程序？[y/N] ' "$name"
+  IFS= read -r answer || return 1
+  case "$answer" in
+    y|Y) sp kill -- "$name" && say "已结束 $name" ;;
+    *) say '已取消。' ;;
+  esac
 }
 
-choose_number() {
-  local prompt="$1" max="$2" default_value="${3:-}" answer
+command_menu() {
+  inside_session_guard || return 1
+  ensure_ready
+  local choice name rc
+
   while true; do
-    if [ -n "$default_value" ]; then
-      printf '%s [Enter=%s, q=quit]: ' "$prompt" "$default_value"
-    else
-      printf '%s [q=quit]: ' "$prompt"
+    terminal_reset
+    load_sessions || die "无法读取会话列表（shpool 守护进程没起来？）。试试：rdev doctor"
+    load_activity
+    render_menu
+
+    printf '> '
+    if ! IFS= read -r choice; then
+      say ''
+      return "$RDEV_EXIT_PLAIN"
     fi
-    IFS= read -r answer || return 1
-    case "$answer" in q|Q) return 1 ;; esac
-    [ -z "$answer" ] && [ -n "$default_value" ] && answer="$default_value"
-    case "$answer" in
-      *[!0-9]*|'') ;;
-      *) if [ "$answer" -ge 1 ] 2>/dev/null && [ "$answer" -le "$max" ]; then REPLY="$answer"; return 0; fi ;;
+    # 去掉首尾空白
+    choice="${choice#"${choice%%[![:space:]]*}"}"
+    choice="${choice%"${choice##*[![:space:]]}"}"
+
+    case "$choice" in
+      q|Q) return "$RDEV_EXIT_PLAIN" ;;
+      '')
+        name="$(default_session)" || name="$(prompt_new_name)" || continue
+        ;;
+      n|N)
+        name="$(prompt_new_name)" || continue
+        ;;
+      k\ *|K\ *)
+        kill_session_interactive "${choice#? }"
+        continue
+        ;;
+      k|K)
+        fail '用法：k 数字，例如 k 2'
+        continue
+        ;;
+      *[!0-9]*)
+        if ! valid_name "$choice"; then
+          fail '没有这个选项。输入数字、n、q，或一个新会话名称。'
+          continue
+        fi
+        name="$choice"
+        ;;
+      *)
+        choice=$((10#$choice))
+        if [ "$choice" -lt 1 ] || [ "$choice" -gt "${#SESSION_NAMES[@]}" ]; then
+          fail '没有这个编号。'
+          continue
+        fi
+        name="${SESSION_NAMES[$((choice - 1))]}"
+        ;;
     esac
-    printf '\033[31mChoose a number from 1 to %d.\033[0m\n' "$max"
-  done
-}
 
-pick_node() {
-  local i default_node="" last_id
-  if [ "${#NODE_IDS[@]}" -eq 0 ]; then
-    printf 'No nodes yet. Add one with:\n  rdev add NAME HOST --user USER [--port 22]\n'
-    return 2
-  fi
-
-  header
-  printf '\033[1m选择远程节点 · Select a node\033[0m\n\n'
-  i=0
-  while [ "$i" -lt "${#NODE_LABELS[@]}" ]; do
-    printf '  \033[36m%d\033[0m) %s\n' "$((i + 1))" "${NODE_LABELS[$i]}"
-    i=$((i + 1))
-  done
-
-  if [ -r "$STATE_FILE" ]; then
-    IFS= read -r last_id < "$STATE_FILE" || true
-    i=0
-    while [ "$i" -lt "${#NODE_IDS[@]}" ]; do
-      if [ "${NODE_IDS[$i]}" = "$last_id" ]; then default_node="$((i + 1))"; break; fi
-      i=$((i + 1))
-    done
-  fi
-
-  printf '\n'
-  choose_number "Node" "${#NODE_LABELS[@]}" "$default_node" || return 1
-  NODE_INDEX="$((REPLY - 1))"
-  printf '%s\n' "${NODE_IDS[$NODE_INDEX]}" > "$STATE_FILE"
-}
-
-load_workspaces() {
-  local node_id="$1" saved_node workspace extra
-  WORKSPACE_NAMES=()
-  while IFS='|' read -r saved_node workspace extra; do
-    case "$saved_node" in ''|\#*) continue ;; esac
-    [ -z "$extra" ] || continue
-    [ "$saved_node" = "$node_id" ] || continue
-    [ -n "$workspace" ] && WORKSPACE_NAMES[${#WORKSPACE_NAMES[@]}]="$workspace"
-  done < "$WORKSPACES_FILE"
-}
-
-record_workspace() {
-  local node_id="$1" workspace="$2" saved_node saved_workspace extra
-  while IFS='|' read -r saved_node saved_workspace extra; do
-    [ -z "$extra" ] || continue
-    [ "$saved_node" = "$node_id" ] && [ "$saved_workspace" = "$workspace" ] && return 0
-  done < "$WORKSPACES_FILE"
-  printf '%s|%s\n' "$node_id" "$workspace" >> "$WORKSPACES_FILE"
-}
-
-pick_workspace() {
-  local index="$1" node_id="${NODE_IDS[$index]}" i generated workspace selected
-  load_workspaces "$node_id"
-  header
-  printf '\033[1m%s · 当前终端\033[0m\n\n' "${NODE_LABELS[$index]}"
-  printf '  \033[32m1\033[0m) ＋ New workspace\n'
-  i=0
-  while [ "$i" -lt "${#WORKSPACE_NAMES[@]}" ]; do
-    printf '  \033[36m%d\033[0m) %s\n' "$((i + 2))" "${WORKSPACE_NAMES[$i]}"
-    i=$((i + 1))
-  done
-  printf '\n'
-  choose_number "Workspace" "$(( ${#WORKSPACE_NAMES[@]} + 1 ))" || return 1
-  selected="$REPLY"
-  if [ "$selected" -eq 1 ]; then
-    generated="work-$(date +%m%d-%H%M)"
-    printf 'Workspace name [Enter=%s]: ' "$generated"
-    IFS= read -r workspace || return 1
-    [ -n "$workspace" ] || workspace="$generated"
-    case "$workspace" in *[!A-Za-z0-9_.-]*|'') printf '\nWorkspace names may only contain letters, numbers, ".", "_" and "-".\n'; return 2 ;; esac
-  else
-    workspace="${WORKSPACE_NAMES[$((selected - 2))]}"
-  fi
-  WORKSPACE_NAME="$workspace"
-  record_workspace "$node_id" "$workspace"
-}
-
-prepare_remote() {
-  local index="$1"
-  build_ssh_args "$index"
-  printf '%s\n' "$REMOTE_PREPARE" |
-    "$SSH_BIN" -T "${NODE_SSH_ARGS[@]}" "${NODE_HOSTS[$index]}" \
-      "rdev_auto_install=$AUTO_INSTALL_REMOTE exec sh -s"
-}
-
-shell_quote() {
-  local value="$1"
-  value="$(printf '%s' "$value" | sed "s/'/'\\\\''/g")"
-  printf "'%s'" "$value"
-}
-
-session_key() {
-  REPLY="s$(printf '%s' "$1|$2" | cksum | awk '{print $1}')"
-}
-
-connect_node() {
-  local index="$1" workspace="$2" session remote_command connect_rc
-  header
-  printf '\033[1m%s\033[0m\n' "${NODE_LABELS[$index]}"
-  printf 'Workspace: \033[36m%s\033[0m\n\n' "$workspace"
-  printf '正在准备远程会话… · Preparing remote session…\n'
-  prepare_remote "$index" || return $?
-  session_key "${NODE_IDS[$index]}" "$workspace"
-  session="$REPLY"
-  remote_command="rdev_session=$session exec sh -c $(shell_quote "$REMOTE_ATTACH")"
-  printf '%s|%s\n' "${NODE_IDS[$index]}" "$workspace" > "$LAST_CONNECTION_FILE"
-
-  while true; do
-    printf '正在当前终端连接… · Connecting in the current terminal…\n'
-    "$SSH_BIN" -tt "${NODE_SSH_ARGS[@]}" "${NODE_HOSTS[$index]}" "$remote_command"
-    connect_rc=$?
-    [ "$connect_rc" -eq 255 ] || return "$connect_rc"
-    printf '\n连接中断，%s 秒后重连；按 Ctrl-C 停止。 · Disconnected; reconnecting in %ss. Ctrl-C stops.\n' \
-      "$RECONNECT_DELAY" "$RECONNECT_DELAY" >&2
-    sleep "$RECONNECT_DELAY"
-  done
-}
-
-command_resume() {
-  local node_id workspace extra index
-  load_nodes || return 1
-  if [ ! -r "$LAST_CONNECTION_FILE" ]; then
-    printf 'No previous remote workspace is available.\n'
-    return 0
-  fi
-  IFS='|' read -r node_id workspace extra < "$LAST_CONNECTION_FILE" || true
-  if [ -n "$extra" ] || [ -z "$node_id" ] || [ -z "$workspace" ] || ! find_node_index "$node_id"; then
-    printf 'No previous remote workspace is available.\n'
-    return 0
-  fi
-  index="$REPLY"
-  connect_node "$index" "$workspace"
-}
-
-run_menu() {
-  local pick_rc
-  install_ui_traps
-  load_nodes || return 1
-  while true; do
-    pick_node
-    pick_rc=$?
-    [ "$pick_rc" -eq 2 ] && return 0
-    [ "$pick_rc" -ne 0 ] && return 0
-    pick_workspace "$NODE_INDEX"
-    pick_rc=$?
-    [ "$pick_rc" -eq 1 ] && continue
-    [ "$pick_rc" -eq 2 ] && continue
-    connect_node "$NODE_INDEX" "$WORKSPACE_NAME"
-    return $?
-  done
-}
-
-prompt_default() {
-  local prompt="$1" default_value="$2" value
-  printf '%s [%s]: ' "$prompt" "$default_value"
-  IFS= read -r value || return 1
-  [ -n "$value" ] || value="$default_value"
-  REPLY="$value"
-}
-
-command_add() {
-  local name="" host="" user="${USER:-$(id -un)}" port=22 identity="" proxy_jump="" requested_id="" id pair
-  local -a positionals
-  positionals=()
-  while [ "$#" -gt 0 ]; do
-    case "$1" in
-      --user|-u) [ "$#" -ge 2 ] || { printf '%s requires a value.\n' "$1" >&2; return 2; }; user="$2"; shift 2 ;;
-      --port|-p) [ "$#" -ge 2 ] || { printf '%s requires a value.\n' "$1" >&2; return 2; }; port="$2"; shift 2 ;;
-      --identity|-i) [ "$#" -ge 2 ] || { printf '%s requires a value.\n' "$1" >&2; return 2; }; identity="$2"; shift 2 ;;
-      --proxy-jump|-J) [ "$#" -ge 2 ] || { printf '%s requires a value.\n' "$1" >&2; return 2; }; proxy_jump="$2"; shift 2 ;;
-      --id) [ "$#" -ge 2 ] || { printf '%s requires a value.\n' "$1" >&2; return 2; }; requested_id="$2"; shift 2 ;;
-      --help|-h) usage_add; return 0 ;;
-      --*) printf 'Unknown add option: %s\n' "$1" >&2; return 2 ;;
-      *) positionals[${#positionals[@]}]="$1"; shift ;;
+    attach_session "$name"
+    rc=$?
+    case "$rc" in
+      0) return 0 ;;
+      2) continue ;;
+      *) return "$rc" ;;
     esac
   done
+}
 
-  [ "${#positionals[@]}" -ge 1 ] && name="${positionals[0]}"
-  [ "${#positionals[@]}" -ge 2 ] && host="${positionals[1]}"
-  [ "${#positionals[@]}" -le 2 ] || { printf 'add accepts at most NAME and HOST as positional arguments.\n' >&2; return 2; }
-  if [ -z "$name" ]; then printf 'Display name: '; IFS= read -r name || return 1; fi
-  if [ -z "$host" ]; then printf 'Host or IP: '; IFS= read -r host || return 1; fi
-  [ -n "$name" ] && [ -n "$host" ] || { printf 'NAME and HOST are required.\n' >&2; return 2; }
+# ---------------------------------------------------------------------------
+# 直达命令
+# ---------------------------------------------------------------------------
+command_attach() {
+  local name="${1:-}"
+  inside_session_guard || return 1
+  [ -n "$name" ] || die '用法：rdev attach 会话名'
+  valid_name "$name" || die '名称只能包含字母、数字、. _ -，且不能以 . 或 - 开头。'
+  ensure_ready
+  attach_session "$name"
+  case "$?" in 1) return 1 ;; *) return 0 ;; esac
+}
 
-  if [ "${#positionals[@]}" -eq 0 ]; then
-    prompt_default "SSH user" "$user" || return 1; user="$REPLY"
-    prompt_default "SSH port" "$port" || return 1; port="$REPLY"
-  fi
-  case "$port" in *[!0-9]*|'') printf 'SSH port must be a number.\n' >&2; return 2 ;; esac
-  [ "$port" -ge 1 ] && [ "$port" -le 65535 ] || { printf 'SSH port must be between 1 and 65535.\n' >&2; return 2; }
-  for pair in "name:$name" "host:$host" "user:$user" "identity:$identity" "proxy-jump:$proxy_jump"; do
-    validate_field "${pair%%:*}" "${pair#*:}" || return 2
-  done
-  if [ -n "$requested_id" ]; then REPLY="$requested_id"; else slugify "$name"; fi
-  id="$REPLY"
-  case "$id" in *[!a-zA-Z0-9._-]*|'') printf 'Node ID contains unsupported characters: %s\n' "$id" >&2; return 2 ;; esac
-
-  load_nodes || return 1
-  if find_node_index "$id"; then
-    printf 'A node with ID "%s" already exists. Remove it first or choose --id.\n' "$id" >&2
-    return 2
-  fi
-  printf '%s|%s|%s|%s|%s|%s|%s\n' "$id" "$name" "$host" "$user" "$port" "$identity" "$proxy_jump" >> "$NODES_FILE"
-  chmod 600 "$NODES_FILE"
-  printf 'Added %s (%s@%s:%s via SSH + dtach).\n' "$name" "$user" "$host" "$port"
+command_new() {
+  local name="${1:-session-$(date +%m%d-%H%M)}"
+  command_attach "$name"
 }
 
 command_list() {
+  ensure_ready
+  load_sessions || die '无法读取会话列表。试试：rdev doctor'
+  load_activity
   local i
-  load_nodes || return 1
-  if [ "${#NODE_IDS[@]}" -eq 0 ]; then printf 'No nodes configured.\n'; return 0; fi
-  printf '%-4s %-20s %-28s %s\n' '#' 'ID' 'LABEL' 'TARGET'
+  if [ "${#SESSION_NAMES[@]}" -eq 0 ]; then say '还没有会话。'; return 0; fi
   i=0
-  while [ "$i" -lt "${#NODE_IDS[@]}" ]; do
-    printf '%-4s %-20s %-28s %s@%s:%s\n' "$((i + 1))" "${NODE_IDS[$i]}" "${NODE_LABELS[$i]}" "${NODE_USERS[$i]}" "${NODE_HOSTS[$i]}" "${NODE_PORTS[$i]}"
+  while [ "$i" -lt "${#SESSION_NAMES[@]}" ]; do
+    printf '%s\t%s\t%s\t%s\n' "${SESSION_NAMES[$i]}" "${SESSION_STATUSES[$i]}" "${SESSION_ACTIVITY[$i]:-}" "$(ago "${SESSION_LAST[$i]}")"
     i=$((i + 1))
   done
 }
 
-command_remove() {
-  local reference="${1:-}" remove_index remove_id temp line line_id
-  [ -n "$reference" ] || { printf 'Usage: rdev remove ID|NUMBER\n' >&2; return 2; }
-  load_nodes || return 1
-  find_node_index "$reference" || { printf 'Node not found: %s\n' "$reference" >&2; return 1; }
-  remove_index="$REPLY"
-  remove_id="${NODE_IDS[$remove_index]}"
-  temp="$NODES_FILE.tmp.$$"
-  : > "$temp"
-  while IFS= read -r line || [ -n "$line" ]; do
-    case "$line" in ''|\#*) printf '%s\n' "$line" >> "$temp"; continue ;; esac
-    line_id="${line%%|*}"
-    [ "$line_id" = "$remove_id" ] || printf '%s\n' "$line" >> "$temp"
-  done < "$NODES_FILE"
-  mv "$temp" "$NODES_FILE"
-  chmod 600 "$NODES_FILE"
-  temp="$WORKSPACES_FILE.tmp.$$"
-  : > "$temp"
-  while IFS= read -r line || [ -n "$line" ]; do
-    case "$line" in "$remove_id|"*) continue ;; *) printf '%s\n' "$line" >> "$temp" ;; esac
-  done < "$WORKSPACES_FILE"
-  mv "$temp" "$WORKSPACES_FILE"
-  chmod 600 "$WORKSPACES_FILE"
-  printf 'Removed node: %s\n' "$remove_id"
+command_kill() {
+  [ "$#" -gt 0 ] || die '用法：rdev kill 会话名…'
+  ensure_ready
+  sp kill -- "$@"
 }
 
-command_doctor() {
-  local failures=0 dependency
-  printf 'rdev %s\n' "$RDEV_VERSION"
-  printf 'Config: %s\n' "$CONFIG_DIR"
-  for dependency in ssh awk sed cksum; do
-    if command -v "$dependency" >/dev/null 2>&1; then
-      printf '  [ok] %s: %s\n' "$dependency" "$(command -v "$dependency")"
-    else
-      printf '  [!!] %s: not installed locally\n' "$dependency"
-      failures=$((failures + 1))
-    fi
-  done
-  printf '  [--] dtach: checked and installed on each remote node when needed\n'
-  load_nodes || failures=$((failures + 1))
-  printf 'Nodes:  %d\n' "${#NODE_IDS[@]}"
-  [ "$failures" -eq 0 ]
+command_detach() {
+  ensure_ready
+  if [ "$#" -gt 0 ]; then sp detach -- "$@"; else sp detach; fi
 }
 
-usage_add() {
-  cat <<'EOF'
-Usage:
-  rdev add NAME HOST [options]
-  rdev add                         Interactive mode
+# ---------------------------------------------------------------------------
+# 安装（在远程机器上执行）
+# ---------------------------------------------------------------------------
+fetch() {
+  local url="$1" out="$2"
+  if command -v curl >/dev/null 2>&1; then
+    curl -fsSL --retry 2 -o "$out" "$url"
+  elif command -v wget >/dev/null 2>&1; then
+    wget -q -O "$out" "$url"
+  else
+    fail '这台机器上既没有 curl 也没有 wget。'
+    return 75
+  fi
+}
 
-Options:
-  -u, --user USER                 SSH user (default: current user)
-  -p, --port PORT                 SSH port (default: 22)
-  -i, --identity FILE             SSH private key
-  -J, --proxy-jump HOST           SSH jump host
-      --id ID                     Stable configuration ID
+shpool_asset_name() {
+  local os arch
+  os="$(uname -s)"
+  arch="$(uname -m)"
+  case "$arch" in
+    x86_64|amd64) arch=x86_64 ;;
+    aarch64|arm64) arch=aarch64 ;;
+    *) fail "暂不支持的 CPU 架构：$arch"; return 1 ;;
+  esac
+  case "$os" in
+    Linux) printf 'shpool-%s-unknown-linux-musl.tar.gz' "$arch" ;;
+    Darwin)
+      [ "$arch" = aarch64 ] || { fail 'macOS 只提供 Apple Silicon 预编译包；Intel Mac 请先 brew install shpool（brew tap shell-pool/shpool）。'; return 1; }
+      printf 'shpool-aarch64-apple-darwin.tar.gz'
+      ;;
+    *) fail "暂不支持的系统：$os"; return 1 ;;
+  esac
+}
 
-Example:
-  rdev add "Build server" 10.0.0.8 --user root --port 2224
+install_shpool_from_archive() {
+  local archive="$1" tmp found
+  tmp="$(mktemp -d "${TMPDIR:-/tmp}/rdev-shpool.XXXXXX")" || return 1
+  if ! tar -xzf "$archive" -C "$tmp" 2>/dev/null; then
+    rm -rf "$tmp"
+    fail "无法解压 $archive"
+    return 1
+  fi
+  found="$(find "$tmp" -type f -name shpool | head -n 1)"
+  if [ -z "$found" ]; then
+    rm -rf "$tmp"
+    fail '压缩包里没有 shpool 可执行文件。'
+    return 1
+  fi
+  mkdir -p "$RDEV_HOME/bin"
+  install -m 755 "$found" "$RDEV_HOME/bin/shpool"
+  rm -rf "$tmp"
+  if ! "$RDEV_HOME/bin/shpool" version >/dev/null 2>&1; then
+    fail "$RDEV_HOME/bin/shpool 无法运行（架构或系统不匹配？）"
+    return 1
+  fi
+}
+
+download_and_install_shpool() {
+  local asset url tmp
+  asset="$(shpool_asset_name)" || return 1
+  url="$RDEV_SHPOOL_RELEASES/$RDEV_SHPOOL_VERSION/$asset"
+  tmp="$(mktemp -d "${TMPDIR:-/tmp}/rdev-shpool.XXXXXX")" || return 1
+  tmp="$tmp/$asset"
+  say "下载 shpool $RDEV_SHPOOL_VERSION（$asset）…"
+  if ! fetch "$url" "$tmp"; then
+    rm -rf "$(dirname "$tmp")"
+    fail "下载失败：$url"
+    fail '这台机器可能访问不了 GitHub。可以在本机执行安装脚本（它会代为下载并推送过来），或用 cargo install shpool 后重试。'
+    return 75
+  fi
+  install_shpool_from_archive "$tmp"
+  local rc=$?
+  rm -rf "$(dirname "$tmp")"
+  return "$rc"
+}
+
+# rc 文件钩子。用标记包裹，可重复执行、可干净移除。
+hook_block_zsh() {
+  cat <<EOF
+# >>> rdev >>>  SSH 登录后恢复 / 新建持久会话（https://github.com/$RDEV_REPO）
+if [[ -o interactive && -o zle && -n \${SSH_TTY:-} && -z \${SHPOOL_SESSION_NAME:-} && -z \${RDEV_SKIP:-} && -z \${RDEV_HOOK_DONE:-} ]]; then
+  export RDEV_HOOK_DONE=1
+  typeset -g _rdev_pending=1
+  _rdev_line_init() {
+    (( _rdev_pending )) || return 0
+    _rdev_pending=0
+    zle -I
+    "$RDEV_BIN_DIR/rdev" </dev/tty >/dev/tty 2>/dev/tty
+    local rc=\$?
+    (( rc == 0 )) && exit 0
+    zle reset-prompt 2>/dev/null
+  }
+  autoload -Uz add-zle-hook-widget
+  add-zle-hook-widget line-init _rdev_line_init
+fi
+# <<< rdev <<<
 EOF
+}
+
+hook_block_bash() {
+  cat <<EOF
+# >>> rdev >>>  SSH 登录后恢复 / 新建持久会话（https://github.com/$RDEV_REPO）
+if [[ \$- == *i* && -n \${SSH_TTY:-} && -z \${SHPOOL_SESSION_NAME:-} && -z \${RDEV_SKIP:-} && -z \${RDEV_HOOK_DONE:-} && -t 0 ]]; then
+  export RDEV_HOOK_DONE=1
+  "$RDEV_BIN_DIR/rdev" </dev/tty >/dev/tty 2>/dev/tty && exit 0
+elif [[ -n \${SHPOOL_SESSION_NAME:-} ]]; then
+  shopt -s huponexit   # 会话里：离开 shell 时让后台任务一起收尾（shpool 官方建议）
+fi
+# <<< rdev <<<
+EOF
+}
+
+strip_hook() {
+  # 打印去掉 rdev 标记块后的文件内容
+  awk '
+    /^# >>> rdev >>>/ { skip = 1; next }
+    /^# <<< rdev <<</  { skip = 0; next }
+    !skip
+  ' "$1"
+}
+
+install_hook() {
+  local file="$1" kind="$2" tmp
+  tmp="$(mktemp "${TMPDIR:-/tmp}/rdev-rc.XXXXXX")" || return 1
+  if [ -f "$file" ]; then
+    strip_hook "$file" > "$tmp"
+    # 保证末尾有换行
+    [ -s "$tmp" ] && [ -n "$(tail -c 1 "$tmp")" ] && printf '\n' >> "$tmp"
+  fi
+  printf '\n' >> "$tmp"
+  case "$kind" in
+    zsh) hook_block_zsh >> "$tmp" ;;
+    bash) hook_block_bash >> "$tmp" ;;
+  esac
+  cat "$tmp" > "$file"
+  rm -f "$tmp"
+}
+
+remove_hook() {
+  local file="$1" tmp
+  [ -f "$file" ] || return 0
+  grep -q '^# >>> rdev >>>' "$file" || return 0
+  tmp="$(mktemp "${TMPDIR:-/tmp}/rdev-rc.XXXXXX")" || return 1
+  strip_hook "$file" > "$tmp"
+  cat "$tmp" > "$file"
+  rm -f "$tmp"
+  say "已从 $file 移除 rdev 钩子"
+}
+
+login_shell() {
+  local shell=""
+  if command -v getent >/dev/null 2>&1; then
+    shell="$(getent passwd "$(id -un)" 2>/dev/null | cut -d: -f7)"
+  elif command -v dscl >/dev/null 2>&1; then
+    shell="$(dscl . -read "/Users/$(id -un)" UserShell 2>/dev/null | awk '{ print $2 }')"
+  fi
+  [ -n "$shell" ] || shell="${SHELL:-/bin/sh}"
+  printf '%s' "$(basename "$shell")"
+}
+
+install_shell_hooks() {
+  local shell hooked=0
+  shell="$(login_shell)"
+  if [ "$shell" = zsh ] || [ -f "$HOME/.zshrc" ]; then
+    install_hook "$HOME/.zshrc" zsh && say "已写入 ~/.zshrc 钩子" && hooked=1
+  fi
+  if [ "$shell" = bash ] || [ -f "$HOME/.bashrc" ]; then
+    install_hook "$HOME/.bashrc" bash && say "已写入 ~/.bashrc 钩子" && hooked=1
+    if [ "$shell" = bash ] && [ -f "$HOME/.bash_profile" ] && ! grep -q 'bashrc' "$HOME/.bash_profile"; then
+      install_hook "$HOME/.bash_profile" bash && say "已写入 ~/.bash_profile 钩子（它没有加载 ~/.bashrc）"
+    fi
+  fi
+  case "$shell" in
+    zsh|bash) ;;
+    *)
+      warn "登录 shell 是 $shell，rdev 目前只自动接管 bash 和 zsh。"
+      warn "可以在 $shell 的启动文件里自己调用：$RDEV_BIN_DIR/rdev（退出码 0 时结束登录 shell）。"
+      ;;
+  esac
+  [ "$hooked" -eq 1 ]
+}
+
+enable_linger() {
+  command -v loginctl >/dev/null 2>&1 || return 0
+  loginctl enable-linger "$(id -un)" >/dev/null 2>&1 && say '已开启 systemd linger（注销后用户服务不被清理）' || true
+}
+
+command_setup() {
+  local archive="" upgrade=0 hooks=1 linger=1 reset_config=0
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --archive) archive="${2:-}"; shift ;;
+      --archive=*) archive="${1#*=}" ;;
+      --upgrade) upgrade=1 ;;
+      --no-hook) hooks=0 ;;
+      --no-linger) linger=0 ;;
+      --reset-config) reset_config=1 ;;
+      -h|--help) say '用法：rdev setup [--archive shpool.tar.gz] [--upgrade] [--no-hook] [--no-linger] [--reset-config]'; return 0 ;;
+      *) die "未知参数：$1" ;;
+    esac
+    shift
+  done
+
+  printf '%srdev %s · 配置 %s%s\n\n' "$C_BOLD" "$RDEV_VERSION" "$(short_host)" "$C_RESET"
+  mkdir -p "$RDEV_HOME" "$RDEV_CONFIG_DIR" "$RDEV_RUN_DIR"
+  chmod 700 "$RDEV_RUN_DIR" 2>/dev/null || true
+
+  # 1. shpool
+  if [ -n "$archive" ]; then
+    say "从 $archive 安装 shpool…"
+    install_shpool_from_archive "$archive" || return 1
+    case "$archive" in "$RDEV_HOME"/*) rm -f "$archive" ;; esac
+  elif [ "$upgrade" -eq 1 ] || ! resolve_shpool; then
+    download_and_install_shpool || return $?
+  fi
+  resolve_shpool || die '安装后仍然找不到 shpool。'
+  say "shpool：$SHPOOL（$("$SHPOOL" version 2>/dev/null | head -n 1)）"
+
+  # 2. 配置
+  if [ "$reset_config" -eq 1 ] || [ ! -f "$RDEV_SHPOOL_CONFIG" ]; then
+    write_shpool_config
+    say "配置：$RDEV_SHPOOL_CONFIG"
+  else
+    say "配置：$RDEV_SHPOOL_CONFIG（已存在，保留）"
+  fi
+
+  # 3. 守护进程：拉起一次，确认能用
+  if sp list >/dev/null 2>&1; then
+    say "守护进程：运行中（$RDEV_SHPOOL_SOCKET）"
+  else
+    warn '守护进程没能启动。稍后可以用 rdev doctor 查看原因。'
+  fi
+  [ "$linger" -eq 1 ] && enable_linger
+
+  # 4. shell 钩子
+  if [ "$hooks" -eq 1 ]; then
+    install_shell_hooks || warn '没有写入任何 shell 钩子。'
+  fi
+
+  printf '\n%s完成。%s下次 ssh 进来会直接看到会话菜单；现在也可以运行 rdev 试试。\n' "$C_GREEN" "$C_RESET"
+  say "  会话里按 Ctrl-Space Ctrl-q 离开但不结束；菜单里按 q 进入普通 shell。"
+  say "  跳过菜单：ssh -t 主机 'RDEV_SKIP=1 exec \$SHELL -l'"
+}
+
+# ---------------------------------------------------------------------------
+# doctor / uninstall
+# ---------------------------------------------------------------------------
+command_doctor() {
+  local ok='✓' bad='✗' shell
+  printf '%srdev %s%s\n' "$C_BOLD" "$RDEV_VERSION" "$C_RESET"
+  say "程序：$RDEV_BIN_DIR/rdev"
+  if resolve_shpool; then
+    say "$ok shpool：$SHPOOL（$("$SHPOOL" version 2>/dev/null | head -n 1)）"
+  else
+    say "$bad shpool：未找到（rdev setup）"
+  fi
+  say "配置：$RDEV_SHPOOL_CONFIG$([ -f "$RDEV_SHPOOL_CONFIG" ] || printf '（缺失，下次使用时自动生成）')"
+  say "socket：$RDEV_SHPOOL_SOCKET"
+  if [ -n "$SHPOOL" ]; then
+    if sp -D list >/dev/null 2>&1; then
+      say "$ok 守护进程：运行中，$(sp -D list 2>/dev/null | awk 'NR > 1' | wc -l | tr -d ' ') 个会话"
+    else
+      say "$bad 守护进程：未运行（下次 rdev 会自动拉起；日志：$RDEV_RUN_DIR/daemonized-shpool.log）"
+    fi
+  fi
+  shell="$(login_shell)"
+  say "登录 shell：$shell"
+  for f in "$HOME/.zshrc" "$HOME/.bashrc" "$HOME/.bash_profile"; do
+    [ -f "$f" ] || continue
+    if grep -q '^# >>> rdev >>>' "$f"; then say "$ok 钩子：$f"; fi
+  done
+  if [ -n "${SSH_TTY:-}" ]; then say "当前：SSH 登录$([ -n "${SHPOOL_SESSION_NAME:-}" ] && printf '，在会话 %s 内' "$SHPOOL_SESSION_NAME")"; fi
+  if command -v loginctl >/dev/null 2>&1; then
+    say "linger：$(loginctl show-user "$(id -un)" -p Linger 2>/dev/null | cut -d= -f2)"
+  fi
+  if [ -r /etc/systemd/logind.conf ] && grep -Eq '^\s*KillUserProcesses\s*=\s*yes' /etc/systemd/logind.conf; then
+    warn 'logind 设置了 KillUserProcesses=yes：注销时会杀掉后台进程，会话无法保持。请改为 no。'
+  fi
+}
+
+command_uninstall() {
+  local purge=0 yes=0 answer
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --purge) purge=1 ;;
+      -y|--yes) yes=1 ;;
+      *) die "未知参数：$1" ;;
+    esac
+    shift
+  done
+  if [ "$yes" -ne 1 ]; then
+    printf '移除 rdev（钩子、程序、下载的 shpool）？正在运行的会话不受影响。[y/N] '
+    if [ -r /dev/tty ]; then IFS= read -r answer </dev/tty; else IFS= read -r answer; fi
+    case "$answer" in y|Y) ;; *) say '已取消。'; return 0 ;; esac
+  fi
+  remove_hook "$HOME/.zshrc"
+  remove_hook "$HOME/.bashrc"
+  remove_hook "$HOME/.bash_profile"
+  rm -rf "$RDEV_HOME"
+  rm -f "$RDEV_BIN_DIR/rdev"
+  if [ "$purge" -eq 1 ]; then
+    rm -rf "$RDEV_CONFIG_DIR"
+    say "已删除 $RDEV_CONFIG_DIR"
+  else
+    say "保留了配置目录 $RDEV_CONFIG_DIR（加 --purge 可一起删除）"
+  fi
+  say '已移除 rdev。守护进程和其中的会话仍在运行，需要的话用 shpool kill 结束。'
 }
 
 usage() {
   cat <<EOF
-rdev $RDEV_VERSION — persistent remote shells in your current terminal
+rdev $RDEV_VERSION · 让远程 shell 和里面的 agent 在 SSH 断线后继续运行
+https://github.com/$RDEV_REPO
 
-Usage:
-  rdev                         Open the node and workspace menu
-  rdev resume                  Reopen the last remote workspace
-  rdev menu                    Open the node and workspace menu
-  rdev add [NAME HOST] [...]   Add a node (interactive when omitted)
-  rdev list                    List configured nodes
-  rdev remove ID|NUMBER        Remove a node
-  rdev edit                    Edit the independent node file
-  rdev config                  Show configuration paths
-  rdev doctor                  Check the installation
-  rdev version                 Show the version
-  rdev help                    Show this help
+用法：
+  rdev                     会话菜单（恢复 / 新建 / 接管 / 删除）
+  rdev attach 名称         直接进入（不存在则新建）
+  rdev new [名称]          新建会话
+  rdev list                列出会话
+  rdev detach [名称…]      让会话脱离当前终端（不结束）
+  rdev kill 名称…          结束会话
+  rdev setup               在这台机器上安装 / 更新（下载 shpool、写配置、加 shell 钩子）
+  rdev doctor              检查安装状态
+  rdev uninstall [--purge] 移除
+  rdev version
 
-Remote dtach is installed on first connection when missing; no local terminal is launched.
-Run "rdev add --help" for all node options.
+会话里：Ctrl-Space Ctrl-q 离开但不结束。菜单里：q 进入普通 shell。
+跳过菜单登录：ssh -t 主机 'RDEV_SKIP=1 exec \$SHELL -l'
 EOF
 }
 
 main() {
-  local command_name
-  init_config || return 1
-  load_settings
-  migrate_nodes_config || return 1
-  command_name="${1:-}"
+  local cmd="${1:-menu}"
   [ "$#" -gt 0 ] && shift
-  case "$command_name" in
-    '') run_menu ;;
-    resume) command_resume ;;
-    menu) run_menu ;;
-    add) command_add "$@" ;;
+  case "$cmd" in
+    menu|'') command_menu ;;
+    attach|a) command_attach "$@" ;;
+    new|n) command_new "$@" ;;
     list|ls) command_list ;;
-    remove|rm|delete) command_remove "$@" ;;
-    edit) "${EDITOR:-vi}" "$NODES_FILE" ;;
-    config)
-      printf 'config=%s\nnodes=%s\nssh_config=%s\nworkspaces=%s\n' "$SETTINGS_FILE" "$NODES_FILE" "$SSH_CONFIG" "$WORKSPACES_FILE"
-      ;;
+    kill) command_kill "$@" ;;
+    detach) command_detach "$@" ;;
+    setup|install) command_setup "$@" ;;
     doctor) command_doctor ;;
-    version|--version|-V) printf 'rdev %s\n' "$RDEV_VERSION" ;;
+    uninstall) command_uninstall "$@" ;;
+    version|--version|-v) say "rdev $RDEV_VERSION" ;;
     help|--help|-h) usage ;;
-    *) printf 'Unknown command: %s\n\n' "$command_name" >&2; usage >&2; return 2 ;;
+    *) fail "未知命令：$cmd"; usage >&2; exit 2 ;;
   esac
 }
 

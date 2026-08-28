@@ -10,15 +10,16 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
+    env:
+      # macOS 上用系统自带的 bash 3.2 跑，保证兼容
+      RDEV_TEST_BASH: ${{ matrix.os == 'macos-latest' && '/bin/bash' || 'bash' }}
     steps:
       - uses: actions/checkout@v5
       - name: Syntax
-        run: ./tests/test_syntax.sh
-      - name: CLI
-        run: ./tests/test_cli.sh
-      - name: Current-terminal connection
-        run: ./tests/test_active_connection.sh
-      - name: Workspace listing
-        run: ./tests/test_session_listing.sh
-      - name: Remote dtach auto-install
-        run: ./tests/test_auto_install.sh
+        run: $RDEV_TEST_BASH tests/test_syntax.sh
+      - name: Menu
+        run: $RDEV_TEST_BASH tests/test_menu.sh
+      - name: Setup / doctor / uninstall
+        run: $RDEV_TEST_BASH tests/test_setup.sh
+      - name: One-line installer
+        run: $RDEV_TEST_BASH tests/test_install.sh
