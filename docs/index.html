@@ -89,7 +89,7 @@
     border-radius: var(--radius); overflow: hidden;
     font-family: var(--mono); font-size: 0.86rem;
   }
-  .cmd code { flex: 1; padding: 14px 16px; white-space: nowrap; overflow-x: auto; }
+  .cmd code { flex: 1; min-width: 0; padding: 14px 16px; white-space: nowrap; overflow-x: auto; }
   .cmd code::before { content: "$ "; color: var(--faint); }
   .cmd button {
     border: 0; border-left: 1px solid #2a2a2e; background: transparent; color: var(--code-text);
@@ -131,7 +131,7 @@
   .why h2 { max-width: 20em; }
   .why .prose { margin-top: 28px; display: grid; gap: 18px; color: var(--muted); max-width: 42em; }
   .why .prose strong { color: var(--text); font-weight: 600; }
-  .compare { margin-top: 56px; display: grid; grid-template-columns: 1.1fr 1.4fr 1.4fr; font-size: 0.97rem; }
+  .compare { margin-top: 56px; display: grid; grid-template-columns: minmax(0, 1.1fr) minmax(0, 1.4fr) minmax(0, 1.4fr); font-size: 0.97rem; }
   .compare > div { padding: 16px 12px 16px 0; border-top: 1px solid var(--line); }
   .compare .head { border-top: 0; padding-top: 0; font-family: var(--mono); font-size: 0.8rem; color: var(--faint); }
   .compare .head.ok { color: var(--accent); }
@@ -148,7 +148,7 @@
   }
 
   /* 原理 */
-  .flow { margin-top: 44px; display: grid; grid-template-columns: repeat(4, 1fr); gap: 0; }
+  .flow { margin-top: 44px; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 0; }
   .node { position: relative; padding: 22px 28px 22px 0; }
   .node + .node { padding-left: 28px; }
   .node + .node::before { content: "→"; position: absolute; left: -10px; top: 22px; color: var(--faint); font-family: var(--mono); }
@@ -160,14 +160,14 @@
     .node, .node + .node { padding: 18px 0; border-top: 1px solid var(--line); }
     .node + .node::before { display: none; }
   }
-  .notes { margin-top: 56px; display: grid; grid-template-columns: 1fr 1fr; gap: 40px 56px; }
+  .notes { margin-top: 56px; display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 40px 56px; }
   .notes h3 { font-size: 1.05rem; font-weight: 600; }
   .notes p { margin-top: 8px; color: var(--muted); font-size: 0.97rem; }
   .notes .wide { grid-column: 1 / -1; max-width: 42em; }
   @media (max-width: 767px) { .notes { grid-template-columns: 1fr; gap: 28px; } }
 
   /* 截图 */
-  .shots .grid { margin-top: 40px; display: grid; grid-template-columns: 3fr 2fr; gap: 20px; }
+  .shots .grid { margin-top: 40px; display: grid; grid-template-columns: minmax(0, 3fr) minmax(0, 2fr); gap: 20px; }
   .shots .grid .slot:first-child { grid-column: 1 / -1; aspect-ratio: 21 / 9; }
   .shots .grid .slot { aspect-ratio: 16 / 10; }
   .shots figcaption { margin-top: 10px; font-size: 0.9rem; color: var(--muted); }
@@ -175,7 +175,8 @@
   @media (max-width: 767px) { .shots .grid { grid-template-columns: 1fr; } .shots .grid .slot:first-child { aspect-ratio: 16 / 10; } }
 
   /* 安装 */
-  .install .wrap { display: grid; grid-template-columns: 1.2fr 1fr; gap: 64px; }
+  .install .wrap { display: grid; grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr); gap: 64px; }
+  .install .wrap > * { min-width: 0; }
   @media (max-width: 900px) { .install .wrap { grid-template-columns: 1fr; gap: 40px; } }
   .install .cmd { margin-top: 24px; }
   .install h3 { margin-top: 36px; font-size: 1rem; font-weight: 600; }
@@ -183,6 +184,7 @@
   .install ol, .install ul { margin: 12px 0 0; padding-left: 1.2em; color: var(--muted); font-size: 0.97rem; }
   .install li { margin-top: 8px; }
   .install li strong { color: var(--text); font-weight: 600; }
+  .install pre { max-width: 100%; }
   .install pre {
     margin: 10px 0 0; padding: 12px 14px; background: var(--code-bg); color: var(--code-text);
     border-radius: var(--radius); font-size: 0.82rem; overflow-x: auto; line-height: 1.6;
