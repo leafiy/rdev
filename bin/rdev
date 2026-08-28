@@ -246,7 +246,7 @@ attach_session() {
   rc=$?
   terminal_reset
   if [ "$rc" -ne 0 ] && [ $(( $(date +%s) - started )) -lt 3 ]; then
-    fail "无法进入会话 $name（shpool attach 退出码 $rc）。试试：rdev doctor"
+    fail "无法进入会话 ${name}（shpool attach 退出码 ${rc}）。试试：rdev doctor"
     return 1
   fi
   if sp list 2>/dev/null | awk 'NR > 1 { print $1 }' | grep -qx -- "$name"; then
@@ -509,7 +509,7 @@ download_and_install_shpool() {
   url="$RDEV_SHPOOL_RELEASES/$RDEV_SHPOOL_VERSION/$asset"
   tmp="$(mktemp -d "${TMPDIR:-/tmp}/rdev-shpool.XXXXXX")" || return 1
   tmp="$tmp/$asset"
-  say "下载 shpool $RDEV_SHPOOL_VERSION（$asset）…"
+  say "下载 shpool ${RDEV_SHPOOL_VERSION}（${asset}）…"
   if ! fetch "$url" "$tmp"; then
     rm -rf "$(dirname "$tmp")"
     fail "下载失败：$url"
@@ -525,7 +525,7 @@ download_and_install_shpool() {
 # rc 文件钩子。用标记包裹，可重复执行、可干净移除。
 hook_block_zsh() {
   cat <<EOF
-# >>> rdev >>>  SSH 登录后恢复 / 新建持久会话（https://github.com/$RDEV_REPO）
+# >>> rdev >>>  SSH 登录后恢复 / 新建持久会话（https://github.com/${RDEV_REPO}）
 if [[ -o interactive && -o zle && -n \${SSH_TTY:-} && -z \${SHPOOL_SESSION_NAME:-} && -z \${RDEV_SKIP:-} && -z \${RDEV_HOOK_DONE:-} ]]; then
   export RDEV_HOOK_DONE=1
   typeset -g _rdev_pending=1
@@ -547,7 +547,7 @@ EOF
 
 hook_block_bash() {
   cat <<EOF
-# >>> rdev >>>  SSH 登录后恢复 / 新建持久会话（https://github.com/$RDEV_REPO）
+# >>> rdev >>>  SSH 登录后恢复 / 新建持久会话（https://github.com/${RDEV_REPO}）
 if [[ \$- == *i* && -n \${SSH_TTY:-} && -z \${SHPOOL_SESSION_NAME:-} && -z \${RDEV_SKIP:-} && -z \${RDEV_HOOK_DONE:-} && -t 0 ]]; then
   export RDEV_HOOK_DONE=1
   "$RDEV_BIN_DIR/rdev" </dev/tty >/dev/tty 2>/dev/tty && exit 0
@@ -621,7 +621,7 @@ install_shell_hooks() {
   case "$shell" in
     zsh|bash) ;;
     *)
-      warn "登录 shell 是 $shell，rdev 目前只自动接管 bash 和 zsh。"
+      warn "登录 shell 是 ${shell}，rdev 目前只自动接管 bash 和 zsh。"
       warn "可以在 $shell 的启动文件里自己调用：$RDEV_BIN_DIR/rdev（退出码 0 时结束登录 shell）。"
       ;;
   esac
@@ -662,19 +662,19 @@ command_setup() {
     download_and_install_shpool || return $?
   fi
   resolve_shpool || die '安装后仍然找不到 shpool。'
-  say "shpool：$SHPOOL（$("$SHPOOL" version 2>/dev/null | head -n 1)）"
+  say "shpool：${SHPOOL}（$("$SHPOOL" version 2>/dev/null | head -n 1)）"
 
   # 2. 配置
   if [ "$reset_config" -eq 1 ] || [ ! -f "$RDEV_SHPOOL_CONFIG" ]; then
     write_shpool_config
     say "配置：$RDEV_SHPOOL_CONFIG"
   else
-    say "配置：$RDEV_SHPOOL_CONFIG（已存在，保留）"
+    say "配置：${RDEV_SHPOOL_CONFIG}（已存在，保留）"
   fi
 
   # 3. 守护进程：拉起一次，确认能用
   if sp list >/dev/null 2>&1; then
-    say "守护进程：运行中（$RDEV_SHPOOL_SOCKET）"
+    say "守护进程：运行中（${RDEV_SHPOOL_SOCKET}）"
   else
     warn '守护进程没能启动。稍后可以用 rdev doctor 查看原因。'
   fi
@@ -698,7 +698,7 @@ command_doctor() {
   printf '%srdev %s%s\n' "$C_BOLD" "$RDEV_VERSION" "$C_RESET"
   say "程序：$RDEV_BIN_DIR/rdev"
   if resolve_shpool; then
-    say "$ok shpool：$SHPOOL（$("$SHPOOL" version 2>/dev/null | head -n 1)）"
+    say "$ok shpool：${SHPOOL}（$("$SHPOOL" version 2>/dev/null | head -n 1)）"
   else
     say "$bad shpool：未找到（rdev setup）"
   fi
@@ -750,7 +750,7 @@ command_uninstall() {
     rm -rf "$RDEV_CONFIG_DIR"
     say "已删除 $RDEV_CONFIG_DIR"
   else
-    say "保留了配置目录 $RDEV_CONFIG_DIR（加 --purge 可一起删除）"
+    say "保留了配置目录 ${RDEV_CONFIG_DIR}（加 --purge 可一起删除）"
   fi
   say '已移除 rdev。守护进程和其中的会话仍在运行，需要的话用 shpool kill 结束。'
 }

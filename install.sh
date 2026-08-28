@@ -169,7 +169,7 @@ locate_payload() {
     fi
   fi
   PAYLOAD="$TMP_DIR/rdev"
-  say "下载 rdev（$REF）…"
+  say "下载 rdev（${REF}）…"
   download "$RAW_BASE/bin/rdev" "$PAYLOAD" || die "下载失败：$RAW_BASE/bin/rdev"
   grep -q 'RDEV_VERSION=' "$PAYLOAD" || die '下载到的 rdev 内容不对。'
 }
@@ -222,15 +222,15 @@ mode_install() {
   build_ssh_opts
   locate_payload
 
-  step "连接 $HOST${PORT:+（端口 $PORT）}"
+  step "连接 $HOST${PORT:+（端口 ${PORT}）}"
   if ! info="$(remote 'uname -s; uname -m; printf "%s\n" "$HOME"; command -v bash >/dev/null 2>&1 && printf "bash-ok\n"')"; then
-    die "连不上 $HOST。请先确认 ssh ${PORT:+-p $PORT }$HOST 能正常登录。"
+    die "连不上 ${HOST}。请先确认 ssh ${PORT:+-p $PORT }$HOST 能正常登录。"
   fi
   os="$(printf '%s\n' "$info" | sed -n 1p)"
   arch="$(printf '%s\n' "$info" | sed -n 2p)"
   remote_home="$(printf '%s\n' "$info" | sed -n 3p)"
   printf '%s\n' "$info" | grep -q '^bash-ok$' || die '远程机器上没有 bash，rdev 需要 bash（会话本身可以用任意 shell）。'
-  say "远程：$os $arch，家目录 $remote_home"
+  say "远程：$os ${arch}，家目录 $remote_home"
 
   step '推送 rdev'
   push_file "$PAYLOAD" '$HOME/.local/bin/rdev' 755
@@ -242,7 +242,7 @@ mode_install() {
     [ -f "$LOCAL_ARCHIVE" ] || die "找不到文件：$LOCAL_ARCHIVE"
     archive="$LOCAL_ARCHIVE"
   elif asset="$(shpool_asset_for "$os" "$arch")"; then
-    step "下载 shpool $SHPOOL_VERSION（$asset）"
+    step "下载 shpool ${SHPOOL_VERSION}（${asset}）"
     archive="$TMP_DIR/$asset"
     if ! download "$SHPOOL_RELEASES/$SHPOOL_VERSION/$asset" "$archive"; then
       say "本机下载失败，改由远程机器自己下载。"
@@ -266,7 +266,7 @@ mode_install() {
   else
     remote "$setup_cmd" || rc=$?
   fi
-  [ "$rc" -eq 0 ] || die "远程配置失败（退出码 $rc）。可以登录后运行 rdev doctor 查看。"
+  [ "$rc" -eq 0 ] || die "远程配置失败（退出码 ${rc}）。可以登录后运行 rdev doctor 查看。"
 
   printf '\n%s✓ 完成。%s以后照常 ssh：\n\n    ssh %s%s\n\n' "$C_GREEN" "$C_RESET" "${PORT:+-p $PORT }" "$HOST" >&2
   say "登录后会看到会话菜单：回车恢复上次会话，n 新建，q 进入普通 shell。"
