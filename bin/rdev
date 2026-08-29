@@ -49,6 +49,10 @@ else
 fi
 
 say()  { printf '%s\n' "$*"; }
+# 对齐的“标签  值”行（setup / doctor 用）。标签自带补位到 10 列，中文按 2 列算。
+kv()   { printf '  %s%s%s%s\n' "$C_DIM" "$1" "$C_RESET" "$2"; }
+# 把 $HOME 前缀显示成 ~
+tilde() { case "$1" in "$HOME"/*) printf '~%s' "${1#"$HOME"}" ;; *) printf '%s' "$1" ;; esac; }
 warn() { printf '%srdev:%s %s\n' "$C_YELLOW" "$C_RESET" "$*" >&2; }
 fail() { printf '%srdev:%s %s\n' "$C_RED" "$C_RESET" "$*" >&2; }
 die()  { fail "$@"; exit 1; }
@@ -509,7 +513,7 @@ download_and_install_shpool() {
   url="$RDEV_SHPOOL_RELEASES/$RDEV_SHPOOL_VERSION/$asset"
   tmp="$(mktemp -d "${TMPDIR:-/tmp}/rdev-shpool.XXXXXX")" || return 1
   tmp="$tmp/$asset"
-  say "下载 shpool ${RDEV_SHPOOL_VERSION}（${asset}）…"
+  kv 'shpool    ' "下载 ${RDEV_SHPOOL_VERSION}（${asset}）…"
   if ! fetch "$url" "$tmp"; then
     rm -rf "$(dirname "$tmp")"
     fail "下载失败：$url"
@@ -610,12 +614,12 @@ install_shell_hooks() {
   local shell hooked=0
   shell="$(login_shell)"
   if [ "$shell" = zsh ] || [ -f "$HOME/.zshrc" ]; then
-    install_hook "$HOME/.zshrc" zsh && say "已写入 ~/.zshrc 钩子" && hooked=1
+    install_hook "$HOME/.zshrc" zsh && kv '钩子      ' '~/.zshrc' && hooked=1
   fi
   if [ "$shell" = bash ] || [ -f "$HOME/.bashrc" ]; then
-    install_hook "$HOME/.bashrc" bash && say "已写入 ~/.bashrc 钩子" && hooked=1
+    install_hook "$HOME/.bashrc" bash && kv '钩子      ' '~/.bashrc' && hooked=1
     if [ "$shell" = bash ] && [ -f "$HOME/.bash_profile" ] && ! grep -q 'bashrc' "$HOME/.bash_profile"; then
-      install_hook "$HOME/.bash_profile" bash && say "已写入 ~/.bash_profile 钩子（它没有加载 ~/.bashrc）"
+      install_hook "$HOME/.bash_profile" bash && kv '钩子      ' '~/.bash_profile（它没有加载 ~/.bashrc）'
     fi
   fi
   case "$shell" in
@@ -630,11 +634,11 @@ install_shell_hooks() {
 
 enable_linger() {
   command -v loginctl >/dev/null 2>&1 || return 0
-  loginctl enable-linger "$(id -un)" >/dev/null 2>&1 && say '已开启 systemd linger（注销后用户服务不被清理）' || true
+  loginctl enable-linger "$(id -un)" >/dev/null 2>&1 && kv 'linger    ' '已开启（注销后 systemd 不清理用户进程）' || true
 }
 
 command_setup() {
-  local archive="" upgrade=0 hooks=1 linger=1 reset_config=0
+  local archive="" upgrade=0 hooks=1 linger=1 reset_config=0 brief=0 ver
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --archive) archive="${2:-}"; shift ;;
@@ -643,40 +647,41 @@ command_setup() {
       --no-hook) hooks=0 ;;
       --no-linger) linger=0 ;;
       --reset-config) reset_config=1 ;;
+      --brief) brief=1 ;;   # 由 install.sh 调用：只打印结果行，标题和收尾提示由它负责
       -h|--help) say '用法：rdev setup [--archive shpool.tar.gz] [--upgrade] [--no-hook] [--no-linger] [--reset-config]'; return 0 ;;
       *) die "未知参数：$1" ;;
     esac
     shift
   done
 
-  printf '%srdev %s · 配置 %s%s\n\n' "$C_BOLD" "$RDEV_VERSION" "$(short_host)" "$C_RESET"
+  [ "$brief" -eq 1 ] || printf '%srdev %s · 配置 %s%s\n\n' "$C_BOLD" "$RDEV_VERSION" "$(short_host)" "$C_RESET"
   mkdir -p "$RDEV_HOME" "$RDEV_CONFIG_DIR" "$RDEV_RUN_DIR"
   chmod 700 "$RDEV_RUN_DIR" 2>/dev/null || true
 
   # 1. shpool
   if [ -n "$archive" ]; then
-    say "从 $archive 安装 shpool…"
     install_shpool_from_archive "$archive" || return 1
     case "$archive" in "$RDEV_HOME"/*) rm -f "$archive" ;; esac
   elif [ "$upgrade" -eq 1 ] || ! resolve_shpool; then
     download_and_install_shpool || return $?
   fi
   resolve_shpool || die '安装后仍然找不到 shpool。'
-  say "shpool：${SHPOOL}（$("$SHPOOL" version 2>/dev/null | head -n 1)）"
+  ver="$("$SHPOOL" version 2>/dev/null | head -n 1)"
+  kv 'shpool    ' "$(tilde "$SHPOOL")${ver:+（${ver}）}"
 
   # 2. 配置
   if [ "$reset_config" -eq 1 ] || [ ! -f "$RDEV_SHPOOL_CONFIG" ]; then
     write_shpool_config
-    say "配置：$RDEV_SHPOOL_CONFIG"
+    kv '配置      ' "$(tilde "$RDEV_SHPOOL_CONFIG")"
   else
-    say "配置：${RDEV_SHPOOL_CONFIG}（已存在，保留）"
+    kv '配置      ' "$(tilde "$RDEV_SHPOOL_CONFIG")（已存在，保留）"
   fi
 
   # 3. 守护进程：拉起一次，确认能用
   if sp list >/dev/null 2>&1; then
-    say "守护进程：运行中（${RDEV_SHPOOL_SOCKET}）"
+    kv '守护进程  ' '运行中'
   else
-    warn '守护进程没能启动。稍后可以用 rdev doctor 查看原因。'
+    kv '守护进程  ' "${C_YELLOW}没能启动${C_RESET}（登录后运行 rdev doctor 查看原因）"
   fi
   [ "$linger" -eq 1 ] && enable_linger
 
@@ -685,6 +690,7 @@ command_setup() {
     install_shell_hooks || warn '没有写入任何 shell 钩子。'
   fi
 
+  [ "$brief" -eq 1 ] && return 0
   printf '\n%s完成。%s下次 ssh 进来会直接看到会话菜单；现在也可以运行 rdev 试试。\n' "$C_GREEN" "$C_RESET"
   say "  会话里按 Ctrl-Space Ctrl-q 离开但不结束；菜单里按 q 进入普通 shell。"
   say "  跳过菜单：ssh -t 主机 'RDEV_SKIP=1 exec \$SHELL -l'"

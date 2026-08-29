@@ -39,7 +39,8 @@ else
 fi
 
 say()  { printf '%s\n' "$*" >&2; }
-step() { printf '\n%s▸ %s%s\n' "$C_BOLD" "$*" "$C_RESET" >&2; }
+step() { printf '%s▸ %s%s\n' "$C_BOLD" "$*" "$C_RESET" >&2; }
+note() { printf '  %s\n' "$*" >&2; }
 die()  { printf '%s错误：%s %s\n' "$C_RED" "$C_RESET" "$*" >&2; exit 1; }
 
 usage() {
@@ -114,6 +115,7 @@ ask_target() {  # $1 = here：允许留空，表示配置当前这台机器
   [ "${1:-}" = here ] && printf '  已经在服务器里？直接回车，配置当前这台机器\n' >/dev/tty
   printf '  > ' >/dev/tty
   IFS= read -r TARGET </dev/tty
+  printf '\n' >/dev/tty
   [ -n "$TARGET" ] || [ "${1:-}" = here ] || die '没有输入目标。'
 }
 
@@ -138,7 +140,9 @@ build_ssh_opts() {
   CTL_DIR="$(mktemp -d /tmp/rdev.XXXXXX 2>/dev/null)" || CTL_DIR="$(mktemp -d "$TMP_DIR/c.XXXXXX")"
   chmod 700 "$CTL_DIR"
   CTL_SOCK="$CTL_DIR/s"
-  SSH_OPTS=(-o ControlMaster=auto -o "ControlPath=$CTL_SOCK" -o ControlPersist=180 -o ServerAliveInterval=15)
+  # LogLevel=ERROR：不打印 "Connection to … closed." / "Permanently added …" 之类的提示，
+  # 但登录失败、主机密钥变化等错误照常显示，首次连接的密钥确认也照常询问。
+  SSH_OPTS=(-o ControlMaster=auto -o "ControlPath=$CTL_SOCK" -o ControlPersist=180 -o ServerAliveInterval=15 -o LogLevel=ERROR)
   [ -n "$PORT" ] && SSH_OPTS+=(-p "$PORT")
   [ -n "$IDENTITY" ] && SSH_OPTS+=(-i "$IDENTITY")
   [ -n "$JUMP" ] && SSH_OPTS+=(-J "$JUMP")
@@ -181,7 +185,7 @@ locate_payload() {
     fi
   fi
   PAYLOAD="$TMP_DIR/rdev"
-  say "下载 rdev（${REF}）…"
+  step "下载 rdev（${REF}）"
   download "$RAW_BASE/bin/rdev" "$PAYLOAD" || die "下载失败：$RAW_BASE/bin/rdev"
   grep -q 'RDEV_VERSION=' "$PAYLOAD" || die '下载到的 rdev 内容不对。'
 }
@@ -202,11 +206,10 @@ shpool_asset_for() {
 
 mode_here() {
   local bin_dir="${RDEV_BIN_DIR:-$HOME/.local/bin}"
-  step '在这台机器上安装 rdev'
   locate_payload
+  step "安装 rdev → $bin_dir/rdev"
   mkdir -p "$bin_dir"
   install -m 755 "$PAYLOAD" "$bin_dir/rdev"
-  say "已安装 $bin_dir/rdev"
   rm -rf "$TMP_DIR"; TMP_DIR=""
   if [ -n "$LOCAL_ARCHIVE" ]; then
     exec "$bin_dir/rdev" setup --archive "$LOCAL_ARCHIVE"
@@ -249,11 +252,10 @@ mode_install() {
   arch="$(printf '%s\n' "$info" | sed -n 2p)"
   remote_home="$(printf '%s\n' "$info" | sed -n 3p)"
   printf '%s\n' "$info" | grep -q '^bash-ok$' || die '远程机器上没有 bash，rdev 需要 bash（会话本身可以用任意 shell）。'
-  say "远程：$os ${arch}，家目录 $remote_home"
+  note "$os $arch · 家目录 $remote_home"
 
-  step '推送 rdev'
+  step '推送 rdev → ~/.local/bin/rdev'
   push_file "$PAYLOAD" '$HOME/.local/bin/rdev' 755
-  say '已推送 ~/.local/bin/rdev'
 
   # 在本机下载 shpool 再推过去：服务器不需要能访问 GitHub。
   archive=""
@@ -264,21 +266,21 @@ mode_install() {
     step "下载 shpool ${SHPOOL_VERSION}（${asset}）"
     archive="$TMP_DIR/$asset"
     if ! download "$SHPOOL_RELEASES/$SHPOOL_VERSION/$asset" "$archive"; then
-      say "本机下载失败，改由远程机器自己下载。"
+      note '本机下载失败，改由远程机器自己下载。'
       archive=""
     fi
   else
-    say "没有 $os/$arch 的预编译包，远程机器需要已安装 shpool（brew / cargo install shpool）。"
+    note "没有 $os/$arch 的预编译包，远程机器需要已安装 shpool（brew / cargo install shpool）。"
   fi
 
-  setup_cmd='"$HOME/.local/bin/rdev" setup'
+  setup_cmd='"$HOME/.local/bin/rdev" setup --brief'
   if [ -n "$archive" ]; then
-    step '推送 shpool'
+    step '推送 shpool → ~/.local/share/rdev/shpool.tar.gz'
     push_file "$archive" '$HOME/.local/share/rdev/shpool.tar.gz' 644
-    setup_cmd='"$HOME/.local/bin/rdev" setup --archive "$HOME/.local/share/rdev/shpool.tar.gz"'
+    setup_cmd="$setup_cmd"' --archive "$HOME/.local/share/rdev/shpool.tar.gz"'
   fi
 
-  step '在远程机器上配置'
+  step '配置远程机器'
   rc=0
   if has_tty; then
     "$SSH_BIN" -t "${SSH_OPTS[@]}" "$HOST" "$setup_cmd" </dev/tty || rc=$?
@@ -288,8 +290,8 @@ mode_install() {
   [ "$rc" -eq 0 ] || die "远程配置失败（退出码 ${rc}）。可以登录后运行 rdev doctor 查看。"
 
   printf '\n%s✓ 完成。%s以后照常 ssh：\n\n    ssh %s%s\n\n' "$C_GREEN" "$C_RESET" "${PORT:+-p $PORT }" "$HOST" >&2
-  say "登录后会看到会话菜单：回车恢复上次会话，n 新建，q 进入普通 shell。"
-  say "会话里按 Ctrl-Space Ctrl-q 离开但不结束；直接关窗口或断网也一样，agent 继续跑。"
+  note '登录后会看到会话菜单：回车恢复上次会话，n 新建，q 进入普通 shell。'
+  note '会话里按 Ctrl-Space Ctrl-q 离开但不结束；直接关窗口或断网也一样，agent 继续跑。'
 
   if [ "$CONNECT" = ask ] && has_tty; then
     printf '\n现在就连上去试试？[Y/n] ' >/dev/tty
