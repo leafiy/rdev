@@ -75,8 +75,22 @@ close_ctl() {
   return 0
 }
 
+# 兜底：任何走 tty 的 ssh（交互登录、卸载确认）都可能因 ControlMaster/mux 的已知问题在退出后
+# 没把本机终端从 raw 模式还原。进入这些步骤前存一份终端状态，收尾时还原并复位常见的终端模式，
+# 保证脚本结束后你的终端一定是正常的。
+TTY_SAVED=""
+tty_save()    { [ -e /dev/tty ] && TTY_SAVED="$(stty -g </dev/tty 2>/dev/null)" || TTY_SAVED=""; return 0; }
+tty_restore() {
+  [ -e /dev/tty ] || return 0
+  [ -n "$TTY_SAVED" ] && stty "$TTY_SAVED" </dev/tty 2>/dev/null
+  # 结束同步输出 / 备用屏 / 各种鼠标模式 / 焦点·括号粘贴，显示光标、清样式、字符集回 ASCII
+  printf '\033[?2026l\033[?1047l\033[?1000l\033[?1002l\033[?1003l\033[?1006l\033[?1004l\033[?2004l\033[?25h\033(B\017\033[m' >/dev/tty 2>/dev/null
+  return 0
+}
+
 cleanup() {
   close_ctl
+  tty_restore
   [ -n "$TMP_DIR" ] && rm -rf "$TMP_DIR"
   return 0
 }
@@ -280,13 +294,12 @@ mode_install() {
     setup_cmd="$setup_cmd"' --archive "$HOME/.local/share/rdev/shpool.tar.gz"'
   fi
 
+  # 不要用 ssh -t：setup 只是打印结果、不读输入。而 -t 会在本机终端进入 raw 模式
+  # （关掉 OPOST），配合 ControlMaster 复用连接时 ssh 常常无法在退出后还原，导致后面
+  # 所有输出「阶梯状」错行、终端卡死。用普通（无 tty）连接即可，本机终端保持正常。
   step '配置远程机器'
   rc=0
-  if has_tty; then
-    "$SSH_BIN" -t "${SSH_OPTS[@]}" "$HOST" "$setup_cmd" </dev/tty || rc=$?
-  else
-    remote "$setup_cmd" || rc=$?
-  fi
+  remote "$setup_cmd" || rc=$?
   [ "$rc" -eq 0 ] || die "远程配置失败（退出码 ${rc}）。可以登录后运行 rdev doctor 查看。"
 
   printf '\n%s✓ 完成。%s以后照常 ssh：\n\n    ssh %s%s\n\n' "$C_GREEN" "$C_RESET" "${PORT:+-p $PORT }" "$HOST" >&2
@@ -313,6 +326,7 @@ mode_install() {
 
 main() {
   parse_args "$@"
+  tty_save
   TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/rdev-install.XXXXXX")"
   case "$MODE" in
     here) mode_here ;;
