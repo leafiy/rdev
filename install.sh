@@ -28,6 +28,7 @@ CONNECT=ask
 EXTRA_SSH=()
 TMP_DIR=""
 CTL_DIR=""
+CTL_SOCK=""
 HOST=""
 SSH_OPTS=()
 
@@ -65,10 +66,16 @@ https://github.com/$REPO
 EOF
 }
 
+close_ctl() {
+  [ -n "$CTL_SOCK" ] || return 0
+  [ -n "$HOST" ] && "$SSH_BIN" -o ControlPath="$CTL_SOCK" -O exit "$HOST" >/dev/null 2>&1 || true
+  rm -rf "$CTL_DIR"
+  CTL_DIR="" CTL_SOCK=""
+  return 0
+}
+
 cleanup() {
-  if [ -n "$CTL_DIR" ] && [ -n "$HOST" ]; then
-    "$SSH_BIN" -o ControlPath="$CTL_DIR/%C" -O exit "$HOST" >/dev/null 2>&1 || true
-  fi
+  close_ctl
   [ -n "$TMP_DIR" ] && rm -rf "$TMP_DIR"
   return 0
 }
@@ -126,10 +133,12 @@ parse_target() {
 }
 
 build_ssh_opts() {
-  CTL_DIR="$TMP_DIR/ctl"
-  mkdir -p "$CTL_DIR"
+  # Unix socket 路径上限约 104 字节；macOS 的 TMPDIR (/var/folders/…/T/) 太长，
+  # 所以控制 socket 单独放在 /tmp 下的短目录里，文件名也保持最短。
+  CTL_DIR="$(mktemp -d /tmp/rdev.XXXXXX 2>/dev/null)" || CTL_DIR="$(mktemp -d "$TMP_DIR/c.XXXXXX")"
   chmod 700 "$CTL_DIR"
-  SSH_OPTS=(-o ControlMaster=auto -o "ControlPath=$CTL_DIR/%C" -o ControlPersist=180 -o ServerAliveInterval=15)
+  CTL_SOCK="$CTL_DIR/s"
+  SSH_OPTS=(-o ControlMaster=auto -o "ControlPath=$CTL_SOCK" -o ControlPersist=180 -o ServerAliveInterval=15)
   [ -n "$PORT" ] && SSH_OPTS+=(-p "$PORT")
   [ -n "$IDENTITY" ] && SSH_OPTS+=(-i "$IDENTITY")
   [ -n "$JUMP" ] && SSH_OPTS+=(-J "$JUMP")
@@ -288,8 +297,7 @@ mode_install() {
     case "$answer" in
       n|N) ;;
       *)
-        "$SSH_BIN" -o ControlPath="$CTL_DIR/%C" -O exit "$HOST" >/dev/null 2>&1 || true
-        CTL_DIR=""
+        close_ctl
         set +e
         if [ -n "$PORT" ]; then
           "$SSH_BIN" -p "$PORT" ${IDENTITY:+-i "$IDENTITY"} ${JUMP:+-J "$JUMP"} ${EXTRA_SSH[@]+"${EXTRA_SSH[@]}"} "$HOST" </dev/tty
