@@ -57,11 +57,61 @@ warn() { printf '%srdev:%s %s\n' "$C_YELLOW" "$C_RESET" "$*" >&2; }
 fail() { printf '%srdev:%s %s\n' "$C_RED" "$C_RESET" "$*" >&2; }
 die()  { fail "$@"; exit 1; }
 
-# 断线时远端程序可能开着鼠标跟踪 / 括号粘贴 / 隐藏光标，本机终端会一直卡在那个状态。
-# 进菜单前和离开会话后都复位一次，避免“鼠标一动就输入锁死”。
+# 断线或 agent 崩溃时，远端程序可能把本机终端留在鼠标跟踪 / kitty 键盘协议 / 备用屏 / 同步输出 /
+# 括号粘贴 / 隐藏光标 / 画线字符集等状态：表现为鼠标一动就冒出一串 “[<35;12;40M” 之类的数字、
+# 打字全乱、或者屏幕不再刷新。进菜单前、离开会话后、退出前都复位一次。
 terminal_reset() {
-  printf '\033[?1000l\033[?1002l\033[?1003l\033[?1005l\033[?1006l\033[?1015l\033[?1004l\033[?2004l\033[?25h\033[<u'
+  printf '\033[?2026l'                                   # 结束“同步输出”，否则终端可能停止刷新
+  printf '\033[?1047l'                                   # 回到主屏幕
+  printf '\033[?1000l\033[?1002l\033[?1003l\033[?9l'     # 各种鼠标跟踪
+  printf '\033[?1005l\033[?1006l\033[?1015l\033[?1016l'  # 鼠标坐标编码
+  printf '\033[?1004l\033[?2004l'                        # 焦点事件、括号粘贴
+  printf '\033[<9u\033[>4;0m'                            # kitty 键盘协议（弹出全部）、xterm modifyOtherKeys
+  printf '\033[?1l\033>\033[?7h'                         # 光标键 / 小键盘回到普通模式、开自动换行
+  printf '\033(B\017\033[m\033[?25h'                     # 字符集回到 ASCII、清样式、显示光标
 }
+
+# 菜单用 read 逐行读输入，需要终端处于正常模式（行编辑 + 回显 + 回车转换行）。zsh 的 ZLE 或没还原
+# 终端的程序可能把它留在 raw 模式：那样回车没反应、打字看不见。进入时记住原状态，退出时原样还给调用者。
+RDEV_TTY_SAVED=""
+tty_begin() {
+  [ -t 0 ] || return 0
+  RDEV_TTY_SAVED="$(stty -g 2>/dev/null)" || RDEV_TTY_SAVED=""
+  trap tty_end EXIT
+  tty_cooked
+}
+tty_cooked() {
+  [ -t 0 ] && stty icanon echo icrnl opost isig 2>/dev/null
+  return 0
+}
+tty_end() {
+  terminal_reset
+  [ -n "$RDEV_TTY_SAVED" ] && stty "$RDEV_TTY_SAVED" 2>/dev/null
+  return 0
+}
+# 丢掉终端已经送来但没人读的输入（残留的鼠标事件、终端应答等），免得它们被当成菜单选择。
+tty_drain() {
+  [ -t 0 ] || return 0
+  local saved n i=0
+  saved="$(stty -g 2>/dev/null)" || return 0
+  stty -icanon -echo min 0 time 0 2>/dev/null || { stty "$saved" 2>/dev/null; return 0; }
+  while [ "$i" -lt 8 ]; do
+    n="$(dd bs=4096 count=1 2>/dev/null | wc -c | tr -d ' ')"
+    [ "${n:-0}" -gt 0 ] || break
+    trace "丢弃 $n 字节残留输入"
+    i=$((i + 1))
+  done
+  stty "$saved" 2>/dev/null
+  return 0
+}
+
+# 排查日志：~/.local/run/rdev/rdev.log（rdev doctor 会给出路径）
+RDEV_TRACE_FILE=""
+trace() {
+  [ -n "$RDEV_TRACE_FILE" ] && printf '%s %s\n' "$(date '+%m-%d %H:%M:%S')" "$*" >> "$RDEV_TRACE_FILE" 2>/dev/null
+  return 0
+}
+tty_describe() { stty -a 2>/dev/null | tr '\n' ' ' | cut -c1-300; }
 
 short_host() {
   local h
@@ -131,6 +181,10 @@ ensure_ready() {
   [ -f "$RDEV_SHPOOL_CONFIG" ] || write_shpool_config
   mkdir -p "$RDEV_RUN_DIR" 2>/dev/null
   chmod 700 "$RDEV_RUN_DIR" 2>/dev/null || true
+  RDEV_TRACE_FILE="$RDEV_RUN_DIR/rdev.log"
+  if [ -f "$RDEV_TRACE_FILE" ] && [ "$(wc -c < "$RDEV_TRACE_FILE" | tr -d ' ')" -gt 65536 ]; then
+    : > "$RDEV_TRACE_FILE"
+  fi
 }
 
 # 读取会话列表到数组：按最近连接时间倒序。
@@ -242,13 +296,18 @@ __RDEV_LINES__
 
 # 进入会话。返回 0 表示“会话已结束”，返回 2 表示“已离开但会话仍在”，返回 1 表示进入失败。
 attach_session() {
-  local name="$1" started rc
+  local name="$1" started rc after
   printf '\n%s进入会话 %s%s%s\n' "$C_DIM" "$C_RESET$C_BOLD" "$name" "$C_RESET"
   terminal_reset
+  trace "attach $name 开始 终端=$(tty_describe)"
   started="$(date +%s)"
   sp attach -f -- "$name"
   rc=$?
+  after="$(tty_describe)"
+  tty_cooked
   terminal_reset
+  tty_drain
+  trace "attach $name 结束 rc=$rc 用时=$(( $(date +%s) - started ))s 返回时终端=$after"
   if [ "$rc" -ne 0 ] && [ $(( $(date +%s) - started )) -lt 3 ]; then
     fail "无法进入会话 ${name}（shpool attach 退出码 ${rc}）。试试：rdev doctor"
     return 1
@@ -348,10 +407,12 @@ kill_session_interactive() {
 command_menu() {
   inside_session_guard || return 1
   ensure_ready
-  local choice name rc
+  local choice name rc first=1
+  trace "菜单启动 rdev=$RDEV_VERSION TERM=${TERM:-} SHELL=${SHELL:-} 终端=$(tty_describe)"
 
   while true; do
     terminal_reset
+    if [ "$first" -eq 1 ]; then tty_drain; first=0; fi
     load_sessions || die "无法读取会话列表（shpool 守护进程没起来？）。试试：rdev doctor"
     load_activity
     render_menu
@@ -710,6 +771,7 @@ command_doctor() {
   fi
   say "配置：$RDEV_SHPOOL_CONFIG$([ -f "$RDEV_SHPOOL_CONFIG" ] || printf '（缺失，下次使用时自动生成）')"
   say "socket：$RDEV_SHPOOL_SOCKET"
+  say "日志：$RDEV_RUN_DIR/rdev.log（菜单 / 进出会话的记录）、$RDEV_RUN_DIR/daemonized-shpool.log（shpool 守护进程）"
   if [ -n "$SHPOOL" ]; then
     if sp -D list >/dev/null 2>&1; then
       say "$ok 守护进程：运行中，$(sp -D list 2>/dev/null | awk 'NR > 1' | wc -l | tr -d ' ') 个会话"
@@ -786,6 +848,7 @@ EOF
 main() {
   local cmd="${1:-menu}"
   [ "$#" -gt 0 ] && shift
+  case "$cmd" in menu|''|attach|a|new|n) tty_begin ;; esac
   case "$cmd" in
     menu|'') command_menu ;;
     attach|a) command_attach "$@" ;;
