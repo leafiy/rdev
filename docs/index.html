@@ -22,7 +22,6 @@
     --accent-soft: #e6f4ea;
     --code-bg: #141417;
     --code-text: #e8e8e6;
-    --slot: #ececea;
     --radius: 10px;
     --sans: ui-sans-serif, -apple-system, "SF Pro Text", "PingFang SC", "Hiragino Sans GB", "Noto Sans CJK SC", "Microsoft YaHei", system-ui, sans-serif;
     --mono: ui-monospace, "SF Mono", Menlo, "JetBrains Mono", Consolas, "Liberation Mono", monospace;
@@ -40,7 +39,6 @@
       --accent-soft: #14251a;
       --code-bg: #0a0a0c;
       --code-text: #e8e8e6;
-      --slot: #1b1b1f;
     }
   }
 
@@ -119,25 +117,6 @@
   .demo-downloads a { text-decoration: underline; text-underline-offset: 3px; }
   .demo-downloads a:hover { color: var(--text); }
 
-  /* 其余截图素材位 */
-  .slot {
-    margin: 0;
-    position: relative;
-    background: var(--slot);
-    border: 1px dashed var(--faint);
-    border-radius: var(--radius);
-    display: grid; place-items: center; text-align: center;
-    color: var(--muted); font-size: 0.9rem; padding: 24px;
-  }
-  .slot small { display: block; margin-top: 6px; color: var(--faint); font-family: var(--mono); font-size: 0.75rem; line-height: 1.5; }
-  .slot-tag {
-    position: absolute; top: 12px; left: 12px;
-    font-family: var(--mono); font-size: 0.7rem; letter-spacing: 0.04em;
-    color: var(--accent); background: var(--accent-soft); border-radius: 6px; padding: 2px 8px;
-  }
-  .slot video, .slot img { display: block; width: 100%; height: 100%; object-fit: cover; border-radius: var(--radius); }
-  .slot-video { aspect-ratio: 16 / 10; }
-
   /* 问题 */
   .why .wrap { max-width: 900px; }
   .why h2 { max-width: 20em; }
@@ -179,12 +158,25 @@
   @media (max-width: 767px) { .notes { grid-template-columns: 1fr; gap: 28px; } }
 
   /* 截图 */
-  .shots .grid { margin-top: 40px; display: grid; grid-template-columns: minmax(0, 3fr) minmax(0, 2fr); gap: 20px; }
-  .shots .grid .slot:first-child { grid-column: 1 / -1; aspect-ratio: 21 / 9; }
-  .shots .grid .slot { aspect-ratio: 16 / 10; }
-  .shots figcaption { margin-top: 10px; font-size: 0.9rem; color: var(--muted); }
-  .shots figure { margin: 0; }
-  @media (max-width: 767px) { .shots .grid { grid-template-columns: 1fr; } .shots .grid .slot:first-child { aspect-ratio: 16 / 10; } }
+  .shots .intro { margin-top: 14px; color: var(--muted); }
+  .shots .grid { margin-top: 36px; display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.18fr); gap: 32px 24px; }
+  .shots figure { margin: 0; min-width: 0; }
+  .shots .reconnect-shot { grid-column: 1 / -1; }
+  .reconnect-pair { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 24px; }
+  .shot-label { display: block; margin-bottom: 8px; color: var(--muted); font-size: 0.85rem; }
+  .shot-image { display: block; overflow: hidden; border: 1px solid var(--line); border-radius: var(--radius); background: #19191c; }
+  .shot-image:hover { border-color: var(--accent); }
+  .shot-image:focus-visible { outline: 3px solid var(--accent); outline-offset: 4px; }
+  .shot-image img { display: block; width: 100%; height: auto; }
+  .reconnect-pair .shot-image { padding: 16px 8px; }
+  .agent-proof { display: grid; gap: 12px; }
+  .shots figcaption { margin-top: 14px; font-size: 0.9rem; color: var(--muted); }
+  .shots figcaption strong { display: block; margin-bottom: 4px; color: var(--text); font-size: 1.02rem; font-weight: 600; }
+  .shots .source-note { margin-top: 24px; font-size: 0.85rem; color: var(--muted); }
+  @media (max-width: 767px) {
+    .shots .grid, .reconnect-pair { grid-template-columns: 1fr; }
+    .reconnect-pair { gap: 16px; }
+  }
 
   /* 安装 */
   .install-head { max-width: 40em; }
@@ -357,33 +349,45 @@
 
 <section class="shots" id="shots">
   <div class="wrap">
-    <h2>看起来是这样</h2>
+    <h2>断线再连接，回到同一个任务</h2>
+    <p class="intro">不用换终端，也不用重新交代任务。照常 ssh，选回原会话，远程 AI agent 接着跑。</p>
     <div class="grid">
-      <!-- ▼ 大图位：docs/assets/reconnect.gif（或 .mp4），把 <figure class="slot"> 里的内容换成 <img src="assets/reconnect.gif" alt="断线后重新 ssh，按回车回到原来的会话"> -->
-      <figure>
-        <div class="slot" aria-label="断线重连录屏位">
-          <span class="slot-tag">GIF / 视频</span>
-          <p>断线重连全过程<small>docs/assets/reconnect.gif · 宽 1600px 左右</small></p>
+      <figure class="reconnect-shot">
+        <div class="reconnect-pair">
+          <div>
+            <span class="shot-label">SSH 连接断开</span>
+            <a class="shot-image" href="assets/disconnect.png" target="_blank" rel="noopener" aria-label="放大查看 SSH 断开截图">
+              <img src="assets/disconnect.png" width="1120" height="96" loading="lazy" decoding="async" alt="Kaku 终端显示 Connection to pc2 closed，SSH 连接已断开">
+            </a>
+          </div>
+          <div>
+            <span class="shot-label">照常输入同一条 ssh 命令</span>
+            <a class="shot-image" href="assets/reconnect.png" target="_blank" rel="noopener" aria-label="放大查看重新 SSH 连接截图">
+              <img src="assets/reconnect.png" width="1120" height="96" loading="lazy" decoding="async" alt="在 Kaku 中再次输入 ssh root@pc2 -p 2224">
+            </a>
+          </div>
         </div>
-        <figcaption>拔掉网线，重新 ssh，按回车，回到刚才那个 shell。</figcaption>
+        <figcaption><strong>连接断了，服务器上的任务没有停</strong>这次实测中，SSH 断开期间，任务从第 4 步推进到第 10 步。重新连接仍然使用原来的 ssh 命令。</figcaption>
       </figure>
-      <!-- ▼ 截图位：docs/assets/menu.png -->
       <figure>
-        <div class="slot" aria-label="会话菜单截图位">
-          <span class="slot-tag">截图</span>
-          <p>会话菜单<small>docs/assets/menu.png</small></p>
-        </div>
-        <figcaption>ssh 登录后看到的菜单，会标出每个会话里跑着什么。</figcaption>
+        <a class="shot-image" href="assets/menu.png" target="_blank" rel="noopener" aria-label="放大查看 rdev 会话选择菜单">
+          <img src="assets/menu.png" width="1000" height="560" loading="lazy" decoding="async" alt="rdev 会话菜单列出原会话为可恢复，并提供新建会话入口">
+        </a>
+        <figcaption><strong>选回原会话，不必重新开始</strong>登录后，rdev 列出可恢复和已连接的会话。选中刚才的会话继续工作，也可以按 n 新建。</figcaption>
       </figure>
-      <!-- ▼ 截图位：docs/assets/agent.png -->
       <figure>
-        <div class="slot" aria-label="agent 继续运行截图位">
-          <span class="slot-tag">截图</span>
-          <p>agent 还在原地<small>docs/assets/agent.png</small></p>
+        <div class="agent-proof">
+          <a class="shot-image" href="assets/agent-running.png" target="_blank" rel="noopener" aria-label="放大查看重连后仍在执行的原任务">
+            <img src="assets/agent-running.png" width="1180" height="234" loading="lazy" decoding="async" alt="重连后的远程 AI agent 仍在等待原来的 demo.py 任务完成，已运行两分多钟">
+          </a>
+          <a class="shot-image" href="assets/agent.png" target="_blank" rel="noopener" aria-label="放大查看远程 AI agent 的任务完成结果">
+            <img src="assets/agent.png" width="1180" height="304" loading="lazy" decoding="async" alt="远程 AI agent 报告执行成功，完成全部 24 步、核验日志，并写入 result.md">
+          </a>
         </div>
-        <figcaption>重连之后，Claude Code 的对话和正在跑的任务都在。</figcaption>
+        <figcaption><strong>远程 AI agent 继续完成原任务</strong>上图是重连后的运行状态，下图是同一任务的最终结果：24 步全部完成，日志核验通过，结果已保存。</figcaption>
       </figure>
     </div>
+    <p class="source-note">截图来自同一次 Kaku 真实录屏，仅裁去无关区域和 Ubuntu 登录提示。点击截图可查看大图；完整过程见<a href="#demo" style="text-decoration: underline; text-underline-offset: 3px;">上方 20 秒演示</a>。</p>
   </div>
 </section>
 
