@@ -7,6 +7,8 @@ on:
 jobs:
   test:
     strategy:
+      # 两个平台分别报告结果，避免一边失败把另一边标成 Cancelled。
+      fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}

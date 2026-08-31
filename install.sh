@@ -77,14 +77,20 @@ close_ctl() {
 
 # 兜底：任何走 tty 的 ssh（交互登录、卸载确认）都可能因 ControlMaster/mux 的已知问题在退出后
 # 没把本机终端从 raw 模式还原。进入这些步骤前存一份终端状态，收尾时还原并复位常见的终端模式，
-# 保证脚本结束后你的终端一定是正常的。
+# 尽量避免脚本退出后终端仍处于异常模式。
 TTY_SAVED=""
-tty_save()    { [ -e /dev/tty ] && TTY_SAVED="$(stty -g </dev/tty 2>/dev/null)" || TTY_SAVED=""; return 0; }
+tty_save() {
+  # /dev/tty 存在不代表当前进程有控制终端（CI、非交互 ssh 都可能没有）。
+  # 先重定向 stderr，连打开 /dev/tty 失败的诊断也一起静默。
+  TTY_SAVED="$(stty -g 2>/dev/null </dev/tty)" || TTY_SAVED=""
+  return 0
+}
 tty_restore() {
-  [ -e /dev/tty ] || return 0
-  [ -n "$TTY_SAVED" ] && stty "$TTY_SAVED" </dev/tty 2>/dev/null
+  [ -n "$TTY_SAVED" ] || return 0
+  # 收尾尽力恢复；即使终端已经断开，也不能覆盖安装结果或中断临时文件清理。
+  stty "$TTY_SAVED" 2>/dev/null </dev/tty || true
   # 结束同步输出 / 备用屏 / 各种鼠标模式 / 焦点·括号粘贴，显示光标、清样式、字符集回 ASCII
-  printf '\033[?2026l\033[?1047l\033[?1000l\033[?1002l\033[?1003l\033[?1006l\033[?1004l\033[?2004l\033[?25h\033(B\017\033[m' >/dev/tty 2>/dev/null
+  printf '\033[?2026l\033[?1047l\033[?1000l\033[?1002l\033[?1003l\033[?1006l\033[?1004l\033[?2004l\033[?25h\033(B\017\033[m' 2>/dev/null >/dev/tty || true
   return 0
 }
 

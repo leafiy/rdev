@@ -12,9 +12,15 @@ printf '# remote zshrc\n' > "$FAKE_REMOTE_HOME/.zshrc"
 archive="$WORK/shpool.tar.gz"
 make_fake_archive "$archive"
 
-out="$("$BASH_BIN" "$ROOT/install.sh" 'dev@box.example:2222' -i "$WORK/key" --archive "$archive" --no-connect 2>&1 </dev/null)"
+rc=0
+out="$("$BASH_BIN" "$ROOT/install.sh" 'dev@box.example:2222' -i "$WORK/key" --archive "$archive" --no-connect 2>&1 </dev/null)" || rc=$?
+if [ "$rc" -ne 0 ]; then
+  printf 'FAIL: 非交互安装退出码 %s\n%s\n' "$rc" "$out" >&2
+  exit 1
+fi
 assert_contains "$out" '完成' 'install 输出'
 assert_contains "$out" 'ssh -p 2222 dev@box.example' '连接提示'
+assert_not_contains "$out" '/dev/tty' '非交互安装不应报终端错误'
 
 log="$(cat "$FAKE_SSH_LOG")"
 assert_contains "$log" '-p 2222' 'ssh 端口'
@@ -35,6 +41,13 @@ assert_contains "$(cat "$FAKE_REMOTE_HOME/.zshrc")" '# >>> rdev >>>' '远程 .zs
 "$BASH_BIN" "$ROOT/install.sh" 'ssh://root@10.0.0.8:2200' --archive "$archive" --no-connect >/dev/null 2>&1 </dev/null
 assert_contains "$(cat "$FAKE_SSH_LOG")" '-p 2200' 'ssh:// 端口'
 assert_contains "$(cat "$FAKE_SSH_LOG")" 'root@10.0.0.8' 'ssh:// 主机'
+
+# 安装确实失败时，终端收尾不能吞掉错误或覆盖原来的错误信息。
+rc=0
+out="$("$BASH_BIN" "$ROOT/install.sh" 'dev@box.example' --archive "$WORK/missing.tar.gz" --no-connect 2>&1 </dev/null)" || rc=$?
+assert_eq "$rc" 1 '缺失压缩包应失败'
+assert_contains "$out" '找不到文件' '缺失压缩包的错误提示'
+assert_not_contains "$out" '/dev/tty' '失败收尾不应报终端错误'
 
 # --here：在本机安装
 : > "$FAKE_SSH_LOG"
