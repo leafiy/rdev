@@ -107,7 +107,19 @@
     @keyframes rise { from { opacity: 0; transform: translateY(14px); } to { opacity: 1; transform: none; } }
   }
 
-  /* 素材位：视频 / 截图。替换方法见每个位置上方的注释 */
+  /* 首屏演示视频 */
+  .demo-video { margin: 0; min-width: 0; }
+  .demo-video video {
+    display: block; width: 100%; aspect-ratio: 16 / 10; height: auto;
+    object-fit: contain; background: #0e0e10;
+    border: 1px solid var(--line); border-radius: var(--radius);
+  }
+  .demo-video figcaption { margin-top: 12px; color: var(--muted); font-size: 0.9rem; line-height: 1.6; }
+  .demo-downloads { display: flex; flex-wrap: wrap; gap: 8px 18px; margin-top: 6px; }
+  .demo-downloads a { text-decoration: underline; text-underline-offset: 3px; }
+  .demo-downloads a:hover { color: var(--text); }
+
+  /* 其余截图素材位 */
   .slot {
     margin: 0;
     position: relative;
@@ -249,13 +261,19 @@
       </div>
     </div>
 
-    <!-- ▼ 视频位：把 demo 放到 docs/assets/demo.mp4，然后把这个 <figure> 里的内容换成：
-         <video src="assets/demo.mp4" poster="assets/demo-poster.jpg" autoplay muted loop playsinline></video> -->
-    <figure class="slot slot-video" aria-label="演示视频位">
-      <span class="slot-tag">视频</span>
-      <p>demo 视频位
-        <small>docs/assets/demo.mp4<br>16:10，30 秒内：断线 → 重新 ssh → 回车 → agent 还在</small>
-      </p>
+    <figure class="demo-video" id="demo">
+      <video controls playsinline preload="metadata" poster="assets/demo-poster.jpg"
+             aria-label="rdev 20 秒演示：SSH 断线，远程 AI agent 继续运行" aria-describedby="demo-caption">
+        <source src="assets/demo.mp4" type="video/mp4">
+        你的浏览器不支持视频播放，可<a href="assets/demo.mp4">下载演示视频</a>观看。
+      </video>
+      <figcaption id="demo-caption">
+        20 秒看懂：新建会话 → 断线仍运行 → 重连回到原任务。
+        <div class="demo-downloads">
+          <a href="assets/demo.mp4" download>下载视频</a>
+          <a href="assets/demo-silent.mp4" download>下载静音版</a>
+        </div>
+      </figcaption>
     </figure>
   </div>
 </section>
