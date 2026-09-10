@@ -63,8 +63,4 @@ rc=0
 SHPOOL_SESSION_NAME=anna rdev >/dev/null 2>&1 || rc=$?
 assert_eq "$rc" 1 '会话内运行 rdev'
 
-# 默认配置会自动生成
-assert_contains "$(cat "$HOME/.config/rdev/shpool.toml")" 'session_restore_mode = "simple"' 'shpool.toml'
-assert_contains "$(cat "$HOME/.config/rdev/shpool.toml")" 'prompt_prefix = ""' 'shpool.toml'
-
 printf 'Menu tests passed.\n'

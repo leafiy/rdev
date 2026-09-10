@@ -159,6 +159,26 @@ write_shpool_config() {
   mkdir -p "$(dirname "$RDEV_SHPOOL_CONFIG")"
   cat > "$RDEV_SHPOOL_CONFIG" <<'TOML'
 # rdev 生成的 shpool 配置（https://github.com/leafiy/rdev）
+# 自定义配置会保留；rdev setup 只自动更新未修改的旧版默认配置。
+
+# 保持终端原生：不往提示符里塞会话名。
+prompt_prefix = ""
+
+# 重连时恢复最近一屏，再通知原程序重绘。普通命令或未响应 SIGWINCH 的 TUI 也能看到上下文，
+# 不会只留下会话菜单；不回放整段历史，避免长会话在重连时刷屏。
+session_restore_mode = "screen"
+
+# 服务端输出缓冲上限；screen 模式只恢复一屏，不会回放全部缓冲。
+output_spool_lines = 65535
+vt100_output_spool_width = 240
+TOML
+}
+
+# 只迁移 rdev 自己生成且逐字未改的旧默认配置，不覆盖自定义内容或外部配置。
+is_legacy_shpool_config() {
+  [ "$RDEV_SHPOOL_CONFIG" = "$RDEV_CONFIG_DIR/shpool.toml" ] || return 1
+  cmp -s "$RDEV_SHPOOL_CONFIG" - <<'TOML'
+# rdev 生成的 shpool 配置（https://github.com/leafiy/rdev）
 # 可以随意修改；rdev 不会覆盖已存在的文件（除非执行 rdev setup --reset-config）。
 
 # 保持终端原生：不往提示符里塞会话名。
@@ -297,8 +317,11 @@ __RDEV_LINES__
 # 进入会话。返回 0 表示“会话已结束”，返回 2 表示“已离开但会话仍在”，返回 1 表示进入失败。
 attach_session() {
   local name="$1" started rc after
-  printf '\n%s进入会话 %s%s%s\n' "$C_DIM" "$C_RESET$C_BOLD" "$name" "$C_RESET"
   terminal_reset
+  # 清掉选择界面（保留终端回滚），即使旧会话没有可恢复画面，也不会像卡在菜单。
+  if [ -t 1 ]; then printf '\033[H\033[2J'; fi
+  printf '\n%s进入会话 %s%s%s\n' "$C_DIM" "$C_RESET$C_BOLD" "$name" "$C_RESET"
+  printf '%s暂无输出不代表卡住；Ctrl-Space Ctrl-q 离开，Ctrl+C 会中断当前命令。%s\n' "$C_DIM" "$C_RESET"
   trace "attach $name 开始 终端=$(tty_describe)"
   started="$(date +%s)"
   sp attach -f -- "$name"
@@ -734,6 +757,9 @@ command_setup() {
   if [ "$reset_config" -eq 1 ] || [ ! -f "$RDEV_SHPOOL_CONFIG" ]; then
     write_shpool_config
     kv '配置      ' "$(tilde "$RDEV_SHPOOL_CONFIG")"
+  elif is_legacy_shpool_config; then
+    write_shpool_config
+    kv '配置      ' "$(tilde "$RDEV_SHPOOL_CONFIG")（新会话使用单屏恢复；旧会话保留，但无法补回画面）"
   else
     kv '配置      ' "$(tilde "$RDEV_SHPOOL_CONFIG")（已存在，保留）"
   fi

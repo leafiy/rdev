@@ -12,6 +12,8 @@ out="$(rdev setup --archive "$archive" --no-linger 2>&1)"
 assert_contains "$out" '完成' 'setup 输出'
 [ -x "$HOME/.local/share/rdev/bin/shpool" ] || { echo 'FAIL: shpool 没有安装到 ~/.local/share/rdev/bin' >&2; exit 1; }
 [ -f "$HOME/.config/rdev/shpool.toml" ] || { echo 'FAIL: 没有生成 shpool.toml' >&2; exit 1; }
+default_config="$WORK/default-shpool.toml"
+cp "$HOME/.config/rdev/shpool.toml" "$default_config"
 assert_contains "$(cat "$HOME/.zshrc")" 'export FOO=1' '.zshrc 原内容'
 assert_contains "$(cat "$HOME/.zshrc")" 'add-zle-hook-widget line-init _rdev_line_init' '.zshrc 钩子'
 assert_contains "$(cat "$HOME/.bashrc")" 'shopt -s huponexit' '.bashrc 钩子'
@@ -26,12 +28,29 @@ rdev setup --archive "$archive" --no-linger >/dev/null 2>&1
 assert_eq "$(count_matches "$HOME/.zshrc" '^# >>> rdev >>>')" 1 '.zshrc 钩子数量'
 assert_eq "$(count_matches "$HOME/.bashrc" '^# >>> rdev >>>')" 1 '.bashrc 钩子数量'
 
+# 升级未修改的旧默认配置；不需要重置其他安装状态，再次 setup 保持幂等。
+cp "$ROOT/tests/fixtures/legacy-shpool.toml" "$HOME/.config/rdev/shpool.toml"
+rdev setup --no-linger >/dev/null 2>&1
+cmp -s "$default_config" "$HOME/.config/rdev/shpool.toml" || { echo 'FAIL: 旧默认配置没有升级' >&2; exit 1; }
+rdev setup --no-linger >/dev/null 2>&1
+cmp -s "$default_config" "$HOME/.config/rdev/shpool.toml" || { echo 'FAIL: 重复 setup 改动了配置' >&2; exit 1; }
+
+# 即使只改过注释也保留；外部配置即使与旧默认完全相同也不迁移。
+cp "$ROOT/tests/fixtures/legacy-shpool.toml" "$WORK/custom-shpool.toml"
+printf '# keep my settings\n' >> "$WORK/custom-shpool.toml"
+cp "$WORK/custom-shpool.toml" "$HOME/.config/rdev/shpool.toml"
+rdev setup --no-linger >/dev/null 2>&1
+cmp -s "$WORK/custom-shpool.toml" "$HOME/.config/rdev/shpool.toml" || { echo 'FAIL: 自定义配置被覆盖' >&2; exit 1; }
+cp "$ROOT/tests/fixtures/legacy-shpool.toml" "$WORK/external-shpool.toml"
+RDEV_SHPOOL_CONFIG="$WORK/external-shpool.toml" rdev setup --no-linger >/dev/null 2>&1
+cmp -s "$ROOT/tests/fixtures/legacy-shpool.toml" "$WORK/external-shpool.toml" || { echo 'FAIL: 外部配置被迁移' >&2; exit 1; }
+
 # 用户改过的配置不会被覆盖
 printf 'prompt_prefix = "x"\n' > "$HOME/.config/rdev/shpool.toml"
 rdev setup --no-linger >/dev/null 2>&1
 assert_contains "$(cat "$HOME/.config/rdev/shpool.toml")" 'prompt_prefix = "x"' '保留配置'
 rdev setup --no-linger --reset-config >/dev/null 2>&1
-assert_contains "$(cat "$HOME/.config/rdev/shpool.toml")" 'session_restore_mode = "simple"' '重置配置'
+cmp -s "$default_config" "$HOME/.config/rdev/shpool.toml" || { echo 'FAIL: --reset-config 没有恢复默认配置' >&2; exit 1; }
 
 # 钩子在非 SSH 环境下不做任何事（source 时不能退出 shell）
 ( unset SSH_TTY; "$BASH_BIN" -ic 'source "$HOME/.bashrc"; echo still-here' ) 2>/dev/null | grep -q still-here \

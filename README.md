@@ -36,7 +36,7 @@ curl -fsSL https://leafiy.github.io/rdev/install.sh | bash -s -- --here
 
 1. 用 ssh 连到服务器，全程复用一条连接，密码只输一次。
 2. 在本机下载 [shpool](https://github.com/shell-pool/shpool) 的静态二进制并推过去。服务器访问不了 GitHub 也没关系；不需要 root，不装系统包。
-3. 写一份 shpool 配置到 `~/.config/rdev/shpool.toml`：不改提示符，重连只交还不回放。
+3. 写一份 shpool 配置到 `~/.config/rdev/shpool.toml`：不改提示符，重连恢复最近一屏，不回放整段历史。
 4. 在 `~/.zshrc` / `~/.bashrc` 末尾加一段带标记的钩子，只在交互式 SSH 登录时弹菜单。`ssh host 命令`、scp、rsync、git、VS Code Remote 一律不受影响。
 
 需要：本机有 `ssh` 和 `curl`（macOS、Linux、WSL）；服务器是 Linux x86_64 / arm64（或 Apple Silicon 的 macOS），登录 shell 为 zsh 或 bash。
@@ -90,7 +90,7 @@ rdev uninstall [--purge] 移除
 ```
 
 - **shpool** 是 Google 开源的会话保持工具，只做一件事：把 shell 从 SSH 连接里解耦。它不是终端复用器，不画窗格，不接管键盘鼠标，所以终端还是你的终端。
-- **重连只交还不回放。** 重新连上后，终端被交还给原来的程序并收到 SIGWINCH，Claude Code 这类 TUI 会自己把界面画回来，不会错位、不会重复。断线前已经输出到你终端里的内容仍在你自己的回滚缓冲里，鼠标滚轮照常用。
+- **重连恢复最近一屏。** shpool 先恢复当前画面的上下文，再通过窗口尺寸变化通知程序重绘。普通命令或没有响应重绘的 TUI 也不必等到下一次输出才看到内容；长会话不会回放整段历史。断线前已收到的内容仍在本机终端的回滚缓冲里。
 - **登录钩子只在交互式 SSH 登录时触发**（`SSH_TTY` 存在、不在会话内、有终端），zsh 用 ZLE 的 `line-init` 钩子，等提示符就绪后再弹菜单，与 powerlevel10k instant prompt 等兼容。
 - **守护进程按需拉起。** 服务器重启后第一次登录时 shpool 会自动启动守护进程，不依赖 systemd。有 `loginctl` 时会顺手开启 linger。
 
@@ -100,7 +100,7 @@ rdev uninstall [--purge] 移除
 | --- | --- |
 | `~/.local/bin/rdev` | 本程序（一个 bash 脚本） |
 | `~/.local/share/rdev/bin/shpool` | 下载的 shpool 静态二进制（系统已有 shpool 时不下载） |
-| `~/.config/rdev/shpool.toml` | shpool 配置，可随意修改，`rdev setup` 不会覆盖 |
+| `~/.config/rdev/shpool.toml` | shpool 配置；`rdev setup` 会升级未修改的旧默认配置，保留自定义内容 |
 | `~/.config/rdev/env` | 可选，覆盖 `RDEV_*` 变量（见下） |
 | `~/.local/run/rdev/` | socket 与守护进程日志 |
 | `~/.zshrc` / `~/.bashrc` | 末尾一段 `# >>> rdev >>> … # <<< rdev <<<` 钩子 |
@@ -123,14 +123,28 @@ RDEV_SHPOOL_VERSION=v0.11.3                      # rdev setup 下载的版本
 
 ```toml
 prompt_prefix = ""                 # 不往提示符里塞会话名
-session_restore_mode = "simple"    # 重连只交还并 SIGWINCH，不回放历史
+session_restore_mode = "screen"    # 恢复最近一屏，再通知程序重绘
 output_spool_lines = 65535
 vt100_output_spool_width = 240
 ```
 
-想在新窗口重连时也看到最近的输出，可以把 `session_restore_mode` 改成 `"screen"` 或 `{ lines = 2000 }`；代价是 TUI 程序重连后可能出现重复画面。
+需要更多历史时可改成 `{ lines = 2000 }`；恢复的内容越多，重连时输出越多。`"simple"` 完全不保存画面，只请求程序重绘，不适合作为通用恢复模式：静默运行的命令和部分 TUI 可能没有任何画面。恢复模式在会话创建时确定，修改后需新建会话。
 
 ## 常见问题
+
+**选择会话后还像停在菜单，按 Ctrl+C 才有反应？**
+
+旧版默认使用 `session_restore_mode = "simple"`，输入已经接入会话，但没有恢复画面；Ctrl+C 中断的是会话里的任务，不是“取消选择”。请用 `Ctrl-Space Ctrl-q` 安全离开，不要用 Ctrl+C 刷新。
+
+更新 rdev 后，在服务器运行：
+
+```bash
+rdev setup
+```
+
+未修改的旧默认配置会自动升级为 `"screen"`。自定义配置（包括外部 `RDEV_SHPOOL_CONFIG`）会保留；如需切换，手动将其中的 `session_restore_mode` 改为 `"screen"`，其余设置不必重置。
+
+**已有任务不会被终止，也不需要重启守护进程。** shpool 会重新加载配置，之后新建的会话使用单屏恢复。旧 `simple` 会话没有保存画面缓冲，不能补回，也不能通过修改配置转换成有缓冲的会话；可以继续使用并等待任务完成，再创建新会话。新版进入时会清掉选择界面、提示安全离开方式，不清除本机回滚历史。
 
 **和 tmux、mosh 有什么区别？** tmux 是终端复用器，会接管整个终端：窗格、前缀键、copy-mode、自己的鼠标处理。mosh 解决的是网络抖动和漫游，本身不保持会话，还要本机装客户端、服务器开 UDP。rdev 只做会话保持，本机零安装，走普通 ssh。
 
@@ -163,7 +177,7 @@ curl -fsSL https://leafiy.github.io/rdev/install.sh | bash -s -- --uninstall dev
 
 ## 开发与测试
 
-全部是 bash，兼容 macOS 自带的 bash 3.2。测试用假的 `shpool` 和 `ssh`，不需要网络：
+运行时全部是 bash，兼容 macOS 自带的 bash 3.2。以下基础测试用假的 `shpool` 和 `ssh`，不需要网络：
 
 ```bash
 tests/test_syntax.sh     # 语法与 bash 3.2 兼容性
@@ -172,7 +186,15 @@ tests/test_setup.sh      # setup / doctor / uninstall、钩子幂等
 tests/test_install.sh    # 一键安装脚本（假 ssh 在本地执行远程命令）
 ```
 
-CI 在 Ubuntu 和 macOS（`/bin/bash` 3.2）上运行。
+真实恢复回归需要 Python 3.8+ 和 shpool，使用临时目录、独立守护进程和伪终端，不接触已有会话：
+
+```bash
+RDEV_TEST_SHPOOL=/path/to/shpool python3 tests/test_restore.py
+```
+
+覆盖一万行历史后的静默前台任务、已连接会话接管、断开后从新菜单回车恢复，以及不同窗口尺寸的直连；检查画面已恢复、任务未中断、输入正常送达。
+
+CI 在 Ubuntu 和 macOS（`/bin/bash` 3.2）上运行基础测试，Ubuntu 另下载 shpool v0.11.3 运行真实恢复回归。
 
 宣传页在 `docs/index.html`，素材位说明见 `docs/assets/README.md`。
 

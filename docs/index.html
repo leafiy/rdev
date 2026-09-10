@@ -336,8 +336,8 @@
         <p>它只做一件事：把 shell 从 SSH 连接里解耦出来。它不是终端复用器，不画窗格、不接管键盘和鼠标，所以你的终端还是原来的终端。rdev 负责把它配好，并在登录时给你一个菜单。</p>
       </div>
       <div>
-        <h3>重连时不回放，只交还</h3>
-        <p>重新连上后，rdev 把终端交还给原来的程序并通知它重绘。Claude Code 这类 TUI 会自己把界面画回来，不会出现错位和重复内容。</p>
+        <h3>重连恢复一屏，不刷整段历史</h3>
+        <p>重新连上后，shpool 先恢复最近一屏，再通知原程序重绘。即使命令暂时没有输出或 TUI 没有响应重绘，也能看到上下文；长会话不会回放整段历史。</p>
       </div>
       <div>
         <h3>滚动、复制，都还是本机的事</h3>
@@ -409,7 +409,7 @@
         <ol>
           <li><strong>用 ssh 连到服务器</strong>，全程复用一条连接，只输一次密码。</li>
           <li><strong>在本机下载 shpool 的静态二进制并推过去</strong>，服务器访问不了 GitHub 也没关系。不需要 root，不装包管理器里的任何东西。</li>
-          <li><strong>写一份 shpool 配置</strong>：不改提示符、重连只交还不回放。</li>
+          <li><strong>写一份 shpool 配置</strong>：不改提示符，重连恢复最近一屏，不回放整段历史。</li>
           <li><strong>在 ~/.zshrc 或 ~/.bashrc 末尾加一段带标记的钩子</strong>，只在交互式 SSH 登录时弹菜单；<span class="mono">ssh host 命令</span>、scp、rsync、VS Code Remote 一律不受影响。</li>
         </ol>
 
@@ -459,7 +459,12 @@ rdev doctor     <span class="c"># 检查安装状态</span></pre>
       <details>
         <summary>鼠标滚动和复制还正常吗？</summary>
         <p>正常。rdev 不是多路复用器，没有 copy-mode。滚轮翻的是你终端自己的回滚缓冲，选中即复制。</p>
-        <p>断线前已经输出到你终端里的内容仍在你的回滚里；换一个新终端窗口重连时，从当前画面继续，历史输出不回放。这是为了让 agent 的界面在重连后保持干净。</p>
+        <p>断线前已经输出到你终端里的内容仍在你的回滚里；换一个新终端窗口重连时，恢复最近一屏作为上下文，不会补回整段历史。</p>
+      </details>
+      <details>
+        <summary>选了会话却还像停在菜单？</summary>
+        <p>旧默认配置 <code>session_restore_mode = "simple"</code> 不保存画面，输入可能已经进入会话。不要按 <code>Ctrl+C</code> 刷新，它会中断任务；用 <code>Ctrl-Space Ctrl-q</code> 安全离开。</p>
+        <p>更新 rdev 后运行 <code>rdev setup</code>，未修改的旧默认配置会升级为单屏恢复；自定义配置保留，可手动改为 <code>"screen"</code>。无需重启守护进程，已有任务不受影响，但单屏恢复只对之后新建的会话生效：旧会话未保存的画面无法补回。</p>
       </details>
       <details>
         <summary>不想每次都进菜单？</summary>

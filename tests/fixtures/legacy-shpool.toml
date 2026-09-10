@@ -1,0 +1,14 @@
+# rdev 生成的 shpool 配置（https://github.com/leafiy/rdev）
+# 可以随意修改；rdev 不会覆盖已存在的文件（除非执行 rdev setup --reset-config）。
+
+# 保持终端原生：不往提示符里塞会话名。
+prompt_prefix = ""
+
+# 重连时只把终端交还给原来的程序，并发送 SIGWINCH 让 TUI（agent）自行重绘；
+# 不回放历史输出，所以 agent 的界面不会错乱、不会出现重复内容。
+# 你本机终端已经收到过的内容仍在你自己的回滚缓冲里，鼠标滚轮照常用。
+session_restore_mode = "simple"
+
+# 服务端输出缓冲上限。simple 模式下不用于回放，但保留给以后切换到 "screen" / { lines = N }。
+output_spool_lines = 65535
+vt100_output_spool_width = 240

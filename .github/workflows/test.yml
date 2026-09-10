@@ -25,3 +25,11 @@ jobs:
         run: $RDEV_TEST_BASH tests/test_setup.sh
       - name: One-line installer
         run: $RDEV_TEST_BASH tests/test_install.sh
+      - name: Real terminal restoration
+        if: runner.os == 'Linux'
+        run: |
+          curl -fsSL --retry 2 \
+            https://github.com/shell-pool/shpool/releases/download/v0.11.3/shpool-x86_64-unknown-linux-musl.tar.gz \
+            -o "$RUNNER_TEMP/shpool.tar.gz"
+          tar -xzf "$RUNNER_TEMP/shpool.tar.gz" -C "$RUNNER_TEMP"
+          RDEV_TEST_SHPOOL="$RUNNER_TEMP/shpool" python3 tests/test_restore.py
