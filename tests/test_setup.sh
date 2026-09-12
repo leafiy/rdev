@@ -28,12 +28,18 @@ rdev setup --archive "$archive" --no-linger >/dev/null 2>&1
 assert_eq "$(count_matches "$HOME/.zshrc" '^# >>> rdev >>>')" 1 '.zshrc 钩子数量'
 assert_eq "$(count_matches "$HOME/.bashrc" '^# >>> rdev >>>')" 1 '.bashrc 钩子数量'
 
-# 升级未修改的旧默认配置；不需要重置其他安装状态，再次 setup 保持幂等。
+# 升级未修改的旧默认配置（simple / screen 两版）；再次 setup 保持幂等。
 cp "$ROOT/tests/fixtures/legacy-shpool.toml" "$HOME/.config/rdev/shpool.toml"
 rdev setup --no-linger >/dev/null 2>&1
-cmp -s "$default_config" "$HOME/.config/rdev/shpool.toml" || { echo 'FAIL: 旧默认配置没有升级' >&2; exit 1; }
+cmp -s "$default_config" "$HOME/.config/rdev/shpool.toml" || { echo 'FAIL: 旧 simple 默认配置没有升级' >&2; exit 1; }
+assert_contains "$(cat "$HOME/.config/rdev/shpool.toml")" 'session_restore_mode = { lines = 1000 }' '升级为 lines'
 rdev setup --no-linger >/dev/null 2>&1
 cmp -s "$default_config" "$HOME/.config/rdev/shpool.toml" || { echo 'FAIL: 重复 setup 改动了配置' >&2; exit 1; }
+if [ -f "$ROOT/tests/fixtures/screen-shpool.toml" ]; then
+  cp "$ROOT/tests/fixtures/screen-shpool.toml" "$HOME/.config/rdev/shpool.toml"
+  rdev setup --no-linger >/dev/null 2>&1
+  cmp -s "$default_config" "$HOME/.config/rdev/shpool.toml" || { echo 'FAIL: 旧 screen 默认配置没有升级为 lines' >&2; exit 1; }
+fi
 
 # 即使只改过注释也保留；外部配置即使与旧默认完全相同也不迁移。
 cp "$ROOT/tests/fixtures/legacy-shpool.toml" "$WORK/custom-shpool.toml"
@@ -51,6 +57,7 @@ rdev setup --no-linger >/dev/null 2>&1
 assert_contains "$(cat "$HOME/.config/rdev/shpool.toml")" 'prompt_prefix = "x"' '保留配置'
 rdev setup --no-linger --reset-config >/dev/null 2>&1
 cmp -s "$default_config" "$HOME/.config/rdev/shpool.toml" || { echo 'FAIL: --reset-config 没有恢复默认配置' >&2; exit 1; }
+assert_contains "$(cat "$HOME/.config/rdev/shpool.toml")" 'session_restore_mode = { lines = 1000 }' '重置配置'
 
 # 钩子在非 SSH 环境下不做任何事（source 时不能退出 shell）
 ( unset SSH_TTY; "$BASH_BIN" -ic 'source "$HOME/.bashrc"; echo still-here' ) 2>/dev/null | grep -q still-here \

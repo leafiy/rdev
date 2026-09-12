@@ -1,0 +1,13 @@
+# rdev 生成的 shpool 配置（https://github.com/leafiy/rdev）
+# 自定义配置会保留；rdev setup 只自动更新未修改的旧版默认配置。
+
+# 保持终端原生：不往提示符里塞会话名。
+prompt_prefix = ""
+
+# 重连时恢复最近一屏，再通知原程序重绘。普通命令或未响应 SIGWINCH 的 TUI 也能看到上下文，
+# 不会只留下会话菜单；不回放整段历史，避免长会话在重连时刷屏。
+session_restore_mode = "screen"
+
+# 服务端输出缓冲上限；screen 模式只恢复一屏，不会回放全部缓冲。
+output_spool_lines = 65535
+vt100_output_spool_width = 240

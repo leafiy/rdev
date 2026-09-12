@@ -164,20 +164,25 @@ write_shpool_config() {
 # 保持终端原生：不往提示符里塞会话名。
 prompt_prefix = ""
 
-# 重连时恢复最近一屏，再通知原程序重绘。普通命令或未响应 SIGWINCH 的 TUI 也能看到上下文，
-# 不会只留下会话菜单；不回放整段历史，避免长会话在重连时刷屏。
-session_restore_mode = "screen"
+# 重连时回放最近若干行输出，让长时间运行 / 一直在刷日志的进程在重新连上后立刻
+# “活过来”，而不是空屏卡住（simple 模式只发 SIGWINCH，非 TUI 程序不会自己重绘）。
+# 用 lines 而不是 screen：screen 会整屏快照，容易和 agent 自己的重绘打架、闪一下或错乱；
+# lines 只补最近 N 行历史，够看清上下文，也更接近“日志滚上来”的手感。
+# 想改行数就改这里；想彻底不回放改回 "simple"；想整屏快照用 "screen"。
+session_restore_mode = { lines = 1000 }
 
-# 服务端输出缓冲上限；screen 模式只恢复一屏，不会回放全部缓冲。
+# 服务端输出缓冲上限（回放就从这里取；应 >= 上面的 lines）。
 output_spool_lines = 65535
 vt100_output_spool_width = 240
 TOML
 }
 
-# 只迁移 rdev 自己生成且逐字未改的旧默认配置，不覆盖自定义内容或外部配置。
+# 只迁移 rdev 自己生成、逐字未改的旧默认配置（simple 或 screen 两版），不动任何自定义内容。
+# 命中即由调用方用 write_shpool_config 重写成当前默认（lines）。返回 0 = 是可安全升级的旧默认。
 is_legacy_shpool_config() {
   [ "$RDEV_SHPOOL_CONFIG" = "$RDEV_CONFIG_DIR/shpool.toml" ] || return 1
-  cmp -s "$RDEV_SHPOOL_CONFIG" - <<'TOML'
+  # 最初的 simple 默认（“重连空屏卡住”的根源）
+  cmp -s "$RDEV_SHPOOL_CONFIG" - <<'TOML' && return 0
 # rdev 生成的 shpool 配置（https://github.com/leafiy/rdev）
 # 可以随意修改；rdev 不会覆盖已存在的文件（除非执行 rdev setup --reset-config）。
 
@@ -193,6 +198,23 @@ session_restore_mode = "simple"
 output_spool_lines = 65535
 vt100_output_spool_width = 240
 TOML
+  # 中间发布过的 screen 默认（改用 lines，避免和 agent 自绘打架）
+  cmp -s "$RDEV_SHPOOL_CONFIG" - <<'TOML' && return 0
+# rdev 生成的 shpool 配置（https://github.com/leafiy/rdev）
+# 自定义配置会保留；rdev setup 只自动更新未修改的旧版默认配置。
+
+# 保持终端原生：不往提示符里塞会话名。
+prompt_prefix = ""
+
+# 重连时恢复最近一屏，再通知原程序重绘。普通命令或未响应 SIGWINCH 的 TUI 也能看到上下文，
+# 不会只留下会话菜单；不回放整段历史，避免长会话在重连时刷屏。
+session_restore_mode = "screen"
+
+# 服务端输出缓冲上限；screen 模式只恢复一屏，不会回放全部缓冲。
+output_spool_lines = 65535
+vt100_output_spool_width = 240
+TOML
+  return 1
 }
 
 # 会话命令共用的准备：找到 shpool、保证配置与运行目录存在。守护进程由 shpool 在需要时自动拉起。
@@ -759,7 +781,7 @@ command_setup() {
     kv '配置      ' "$(tilde "$RDEV_SHPOOL_CONFIG")"
   elif is_legacy_shpool_config; then
     write_shpool_config
-    kv '配置      ' "$(tilde "$RDEV_SHPOOL_CONFIG")（新会话使用单屏恢复；旧会话保留，但无法补回画面）"
+    kv '配置      ' "$(tilde "$RDEV_SHPOOL_CONFIG")（重连恢复升级为 lines(1000)；已有会话需新建才生效）"
   else
     kv '配置      ' "$(tilde "$RDEV_SHPOOL_CONFIG")（已存在，保留）"
   fi
