@@ -336,9 +336,9 @@ $lines
 __RDEV_LINES__
 }
 
-# 进入会话。返回 0 表示“会话已结束”，返回 2 表示“已离开但会话仍在”，返回 1 表示进入失败。
+# 进入会话。返回 0 表示“会话已结束”，返回 2 表示“已离开但会话仍在”，返回 1 表示失败或状态未知。
 attach_session() {
-  local name="$1" started rc after
+  local name="$1" started rc after sessions
   terminal_reset
   # 清掉选择界面（保留终端回滚），即使旧会话没有可恢复画面，也不会像卡在菜单。
   if [ -t 1 ]; then printf '\033[H\033[2J'; fi
@@ -353,11 +353,15 @@ attach_session() {
   terminal_reset
   tty_drain
   trace "attach $name 结束 rc=$rc 用时=$(( $(date +%s) - started ))s 返回时终端=$after"
-  if [ "$rc" -ne 0 ] && [ $(( $(date +%s) - started )) -lt 3 ]; then
+  if [ "$rc" -ne 0 ]; then
     fail "无法进入会话 ${name}（shpool attach 退出码 ${rc}）。试试：rdev doctor"
     return 1
   fi
-  if sp list 2>/dev/null | awk 'NR > 1 { print $1 }' | grep -qx -- "$name"; then
+  if ! sessions="$(sp list 2>/dev/null)"; then
+    fail "无法确认会话 ${name} 的状态，返回普通 shell。试试：rdev doctor"
+    return 1
+  fi
+  if printf '%s\n' "$sessions" | awk 'NR > 1 { print $1 }' | grep -Fxq -- "$name"; then
     printf '\n%s已离开会话 %s，它仍在后台运行。%s\n' "$C_DIM" "$name" "$C_RESET"
     return 2
   fi
@@ -425,7 +429,7 @@ default_session() {
 
 prompt_new_name() {
   local suggested="session-$(date +%m%d-%H%M)" name
-  printf '新会话名称 [%s]: ' "$suggested"
+  printf '新会话名称 [%s]: ' "$suggested" >&2
   IFS= read -r name || return 1
   name="${name:-$suggested}"
   if ! valid_name "$name"; then
@@ -669,19 +673,33 @@ EOF
 }
 
 strip_hook() {
-  # 打印去掉 rdev 标记块后的文件内容
-  awk '
+  # 安装时额外移除已知旧版 shpool 自动登录块；卸载仍只移除 rdev。
+  awk -v migrate_shpool="${2:-0}" '
+    migrate_shpool && !legacy && /^# >>> shpool: automatic simple SSH session persistence >>>$/ {
+      legacy = $0 ORS; next
+    }
+    legacy {
+      legacy = legacy $0 ORS
+      if ($0 == "# <<< shpool: automatic simple SSH session persistence <<<") legacy = ""
+      next
+    }
     /^# >>> rdev >>>/ { skip = 1; next }
     /^# <<< rdev <<</  { skip = 0; next }
     !skip
+    END { printf "%s", legacy }
   ' "$1"
 }
 
 install_hook() {
-  local file="$1" kind="$2" tmp
+  local file="$1" kind="$2" tmp backup
   tmp="$(mktemp "${TMPDIR:-/tmp}/rdev-rc.XXXXXX")" || return 1
   if [ -f "$file" ]; then
-    strip_hook "$file" > "$tmp"
+    if grep -q '^# >>> shpool: automatic simple SSH session persistence >>>$' "$file"; then
+      backup="$(mktemp "${file}.rdev-backup.XXXXXX")" || { rm -f "$tmp"; return 1; }
+      cp -p "$file" "$backup" || { rm -f "$tmp"; return 1; }
+      kv '备份      ' "$(tilde "$backup")"
+    fi
+    strip_hook "$file" 1 > "$tmp" || { rm -f "$tmp"; return 1; }
     # 保证末尾有换行
     [ -s "$tmp" ] && [ -n "$(tail -c 1 "$tmp")" ] && printf '\n' >> "$tmp"
   fi

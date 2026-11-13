@@ -37,7 +37,7 @@ curl -fsSL https://leafiy.github.io/rdev/install.sh | bash -s -- --here
 1. 用 ssh 连到服务器，全程复用一条连接，密码只输一次。
 2. 在本机下载 [shpool](https://github.com/shell-pool/shpool) 的静态二进制并推过去。服务器访问不了 GitHub 也没关系；不需要 root，不装系统包。
 3. 写一份 shpool 配置到 `~/.config/rdev/shpool.toml`：不改提示符，重连恢复最近一屏，不回放整段历史。
-4. 在 `~/.zshrc` / `~/.bashrc` 末尾加一段带标记的钩子，只在交互式 SSH 登录时弹菜单。`ssh host 命令`、scp、rsync、git、VS Code Remote 一律不受影响。
+4. 在 `~/.zshrc` / `~/.bashrc` 末尾加一段带标记的钩子，只在交互式 SSH 登录时弹菜单。检测到已知旧版 shpool 自动登录块时，先备份原文件再移除，避免旧入口报错后直接关闭 SSH。`ssh host 命令`、scp、rsync、git、VS Code Remote 一律不受影响。
 
 需要：本机有 `ssh` 和 `curl`（macOS、Linux、WSL）；服务器是 Linux x86_64 / arm64（或 Apple Silicon 的 macOS），登录 shell 为 zsh 或 bash。
 
@@ -105,6 +105,8 @@ rdev uninstall [--purge] 移除
 | `~/.local/run/rdev/` | socket 与守护进程日志 |
 | `~/.zshrc` / `~/.bashrc` | 末尾一段 `# >>> rdev >>> … # <<< rdev <<<` 钩子 |
 
+安装和 `rdev setup` 会迁移 `# >>> shpool: automatic simple SSH session persistence >>>` / `# <<< shpool: automatic simple SSH session persistence <<<` 之间的完整旧自动登录块，备份保存在原文件旁的 `.rdev-backup.XXXXXX` 文件中。未配对的旧标记和其他自定义 shell 内容保留；不会停止旧守护进程或结束已有会话。
+
 不碰 sshd、`~/.ssh/config`，不需要 root。
 
 ### 可覆盖的变量
@@ -131,6 +133,10 @@ vt100_output_spool_width = 240
 需要更多历史时可改成 `{ lines = 2000 }`；恢复的内容越多，重连时输出越多。`"simple"` 完全不保存画面，只请求程序重绘，不适合作为通用恢复模式：静默运行的命令和部分 TUI 可能没有任何画面。恢复模式在会话创建时确定，修改后需新建会话。
 
 ## 常见问题
+
+**新建会话提示 `may not have whitespace`、`grep: Invalid range end`，随后 SSH 断开？**
+
+旧版把“新会话名称”提示写进了会话名，并可能把进入失败误判为会话结束。重新运行上面的安装命令更新 rdev；仅运行 `rdev setup` 不会更新程序本身。修复后提示输出与名称分离，会话名按普通字符串匹配，进入失败或无法读取会话状态时保留普通 shell，不关闭 SSH。
 
 **选择会话后还像停在菜单，按 Ctrl+C 才有反应？**
 
